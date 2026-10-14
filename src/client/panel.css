@@ -1,0 +1,185 @@
+/* 「分支对话」页面样式。
+ *
+ * M0 骨架使用全局语义类名（`.dsh-branch-*`，插件自己拥有这些名字，不与官方样式耦合），
+ * 因此页面代码用 `classes` 里的字符串键，而不是经过哈希的 CSS Modules 名。
+ * 后续接入官方 CSS Modules 构建时，只需把 classes 换成真实模块导出。
+ */
+
+.dsh-branch-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px 22px;
+  overflow-y: auto;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.dsh-branch-header {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dsh-branch-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.dsh-branch-subtitle {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  opacity: 0.72;
+}
+
+.dsh-branch-section-title {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  opacity: 0.6;
+}
+
+.dsh-branch-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  line-height: 1.9;
+}
+
+.dsh-branch-list code {
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.dsh-branch-hint {
+  margin-left: 6px;
+  opacity: 0.55;
+}
+
+.dsh-branch-muted {
+  margin: 0;
+  font-size: 12.5px;
+  opacity: 0.7;
+}
+
+.dsh-branch-warn {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: #d97706;
+}
+
+.dsh-branch-placeholder {
+  flex: 1 1 auto;
+  min-height: 120px;
+  border: 1px dashed currentColor;
+  border-radius: 10px;
+  opacity: 0.5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  text-align: center;
+}
+
+/* --- M1 建分支入口 --- */
+
+.dsh-branch-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 560px;
+}
+
+.dsh-branch-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dsh-branch-label {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.dsh-branch-input,
+.dsh-branch-textarea {
+  font: inherit;
+  font-size: 12.5px;
+  padding: 6px 8px;
+  border: 1px solid rgba(128, 128, 128, 0.4);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+}
+
+.dsh-branch-textarea {
+  resize: vertical;
+  line-height: 1.6;
+}
+
+.dsh-branch-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.dsh-branch-button {
+  font: inherit;
+  font-size: 12.5px;
+  padding: 6px 12px;
+  border: 1px solid rgba(128, 128, 128, 0.4);
+  border-radius: 6px;
+  background: rgba(128, 128, 128, 0.12);
+  color: inherit;
+  cursor: pointer;
+}
+
+.dsh-branch-button:hover:not(:disabled) {
+  background: rgba(128, 128, 128, 0.2);
+}
+
+.dsh-branch-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.dsh-branch-ok {
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: #16a34a;
+}
+
+/* --- 树（M1 用缩进列表，M2 换成流程图） --- */
+
+.dsh-branch-node-children {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dsh-branch-node,
+.dsh-branch-node-current {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.dsh-branch-node-current {
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.dsh-branch-node-orphan {
+  opacity: 0.55;
+}
+

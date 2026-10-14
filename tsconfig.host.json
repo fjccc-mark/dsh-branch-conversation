@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "declaration": true,
+    "declarationMap": true,
+    "emitDeclarationOnly": true,
+    "sourceMap": true,
+    "composite": true,
+    "rootDir": "src",
+    "outDir": "lib/types"
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/client/**", "src/**/*.tsx", "src/**/*.test.ts"]
+}

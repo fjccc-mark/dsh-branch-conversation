@@ -1,0 +1,96 @@
+{
+  "name": "dsh-branch-conversation",
+  "version": "0.0.0",
+  "private": true,
+  "description": "DeepSeek Harness 插件：在官方侧边栏中新增一个「分支对话」页，用流程图管理主对话节点、子对话与文件节点。子对话不继承上下文，只继承模型人设与权限。",
+  "type": "module",
+  "icon": "icon.svg",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./invariant": {
+      "types": "./lib/types/invariant.d.ts",
+      "default": "./lib/invariant.js"
+    },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./testing/fake-sessions": {
+      "types": "./lib/testing/fake-sessions.d.ts",
+      "default": "./lib/testing/fake-sessions.js"
+    },
+    "./src/*": "./src/*",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/**/*.js",
+    "lib/**/*.js.map",
+    "lib/**/*.d.ts",
+    "lib/**/*.d.ts.map",
+    "src",
+    "cordis.patch.yml",
+    "icon.svg",
+    "README.md"
+  ],
+  "dsh": {
+    "engines": {
+      "dsh": ">=0.2.0-rc.2"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-workspace",
+        "@deepseek-ai/dsh-api-session-controller"
+      ],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "typecheck:host": "tsc -b tsconfig.host.json --pretty false",
+    "typecheck:client": "tsc -b tsconfig.client.json --pretty false",
+    "typecheck": "npm run typecheck:host && npm run typecheck:client",
+    "build": "tsdown",
+    "preview": "start tools/preview/panel-preview.html"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.4"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4",
+    "react": "^18.2.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4",
+    "@deepseek-ai/dsh-api-session-controller": "^0.1.2-alpha.2",
+    "@deepseek-ai/dsh-client-locale": "^0.0.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-layout": "^0.0.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-sidebar": "^0.0.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.0.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-workspace": "^0.0.1-rc.1",
+    "@deepseek-ai/dsh-host-webserver": "^0.0.1-rc.1",
+    "@deepseek-ai/dsh-session": "^0.0.1-rc.1",
+    "@types/node": "^22.20.0",
+    "@types/react": "~18.3.1",
+    "@types/react-dom": "^18.3.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tsdown": "^0.22.2",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  }
+}

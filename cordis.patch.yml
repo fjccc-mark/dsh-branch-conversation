@@ -1,0 +1,11 @@
+# dsh-branch-conversation bundle patch
+#
+# 把「分支对话」插件插进 profile 的插件名册。这是一个双面插件：
+#   - node 半（exports "."）在 host 进程运行：树文档存储 + /branch/* 路由
+#   - 浏览器半（package.json 的 dsh.client 声明 + exports "./client"）在 Web GUI 加载
+#
+# 激活方式（profile 名按实际替换）：
+#   dsh plugin --profile <profile> add link:<本仓库绝对路径>
+- insert:
+    - id: branch-conversation
+      name: dsh-branch-conversation
