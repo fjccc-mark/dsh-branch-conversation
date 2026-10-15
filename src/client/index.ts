@@ -13,9 +13,9 @@
 
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import { BRANCH_PANEL_ID } from '../core/types.ts'
-import { installNavigation } from './navigation.ts'
+import { installNavigation, retryNavigation } from './navigation.ts'
 import { BranchPanelIcon, BranchPanelPage } from './panel.tsx'
-import { installSessionsFace, useMainViewSessionId, type ClientSessions } from './use-main-session.ts'
+import { installSessionsFace, retrySessionsFace, useMainViewSessionId, type ClientSessions } from './use-main-session.ts'
 
 export { BranchPanelIcon, BranchPanelPage } from './panel.tsx'
 export type { BranchPanelProps } from './panel.tsx'
@@ -132,17 +132,29 @@ function applyOrThrow(ctx: ClientContext): void {
   }
 
   // 会话目录：优先直接读上下文，其次走 ctx.get('sessions')（同类插件的做法）。
-  const sessions = serviceOf<ClientSessions>(scope, 'sessions')
+  // 真机实测：提供 sessions 的会话控制器自己要等一串服务，可能比我们晚，所以取不到时要重试。
+  const readSessions = (): ClientSessions | undefined => serviceOf<ClientSessions>(scope, 'sessions')
+  const sessions = readSessions()
   installSessionsFace(sessions)
+  if (sessions === undefined) retrySessionsFace(readSessions)
 
   // 导航面：切会话归工作区 UI（多实例客户端会话模型已把导航从会话控制器移走）。
-  const uiWorkspace = serviceOf<{ openSession?: (sessionId: string) => void }>(scope, 'uiWorkspace')
-  const openSession = uiWorkspace?.openSession
-  installNavigation(
-    typeof openSession === 'function'
-      ? { openSession: (sessionId) => openSession.call(uiWorkspace, sessionId) }
-      : undefined,
-  )
+  // 它由 @deepseek-ai/dsh-client-ui-workspace 在自己激活后提供，可能比我们晚 → 取不到要重试。
+  const readWorkspace = (): { openSession?: (sessionId: string) => void } | undefined =>
+    serviceOf<{ openSession?: (sessionId: string) => void }>(scope, 'uiWorkspace')
+  const buildNavigation = (
+    uiWorkspace: { openSession?: (sessionId: string) => void } | undefined,
+  ): { openSession: (sessionId: string) => void } | undefined => {
+    const openSession = uiWorkspace?.openSession
+    return typeof openSession === 'function'
+      ? { openSession: (sessionId: string) => openSession.call(uiWorkspace, sessionId) }
+      : undefined
+  }
+  const uiWorkspace = readWorkspace()
+  installNavigation(buildNavigation(uiWorkspace))
+  if (uiWorkspace?.openSession === undefined) {
+    retryNavigation(() => buildNavigation(readWorkspace()))
+  }
 
   slots.inject(PANEL_LIST_SLOT, () =>
     slots.register(

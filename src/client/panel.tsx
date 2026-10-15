@@ -13,9 +13,9 @@ import { useCallback, useEffect, useState } from 'react'
 import type { ReactElement, ReactNode } from 'react'
 import { branchApi, type BranchCreateValue, type BranchTreeView } from './branch-api.ts'
 import { useCapabilityReport } from './capability.ts'
-import { openSessionById } from './navigation.ts'
+import { openSessionById, subscribeNavigationReady } from './navigation.ts'
 import { isSessionNode, layoutTree, type TreeRow } from './tree-layout.ts'
-import { sessionsFace } from './use-main-session.ts'
+import { sessionsFace, sessionsFaceReady } from './use-main-session.ts'
 
 /** 导出按钮的三种格式（裁决第 4 条：JSON / Markdown / Mermaid）。 */
 const EXPORT_FORMATS = ['json', 'markdown', 'mermaid'] as const
@@ -137,9 +137,20 @@ export function BranchPanelPage({ sessionId = null }: BranchPanelProps = {}): Re
 
   const onOpenSession = useCallback((target: string) => {
     if (!openSessionById(target)) {
-      setFailure('这个部署没有可用的会话切换入口（uiWorkspace.openSession）')
+      setFailure('这个部署没有可用的会话切换入口（uiWorkspace.openSession 还没就绪）')
     }
   }, [])
+
+  // 导航面可能比页面晚就绪：就绪后自动清掉"没有切换入口"的提示（用户不必手动刷新）。
+  useEffect(
+    () =>
+      subscribeNavigationReady(() => {
+        setFailure((current) =>
+          current !== null && current.includes('没有可用的会话切换入口') ? null : current,
+        )
+      }),
+    [],
+  )
 
   /** 导出：拿到内容后在浏览器侧落成文件（不依赖宿主写盘权限）。 */
   const onExport = useCallback(
@@ -487,7 +498,11 @@ function flag(value: boolean): string {
  */
 function noSessionReason(): string {
   const face = sessionsFace()
-  if (face === undefined) return '会话目录服务不可用（ctx.get("sessions") 取不到）'
+  if (face === undefined) {
+    return sessionsFaceReady()
+      ? '会话目录刚就绪，点「刷新」即可'
+      : '会话目录服务还没就绪（正在重试；若一直如此说明会话控制器未激活）'
+  }
   const list = face.list
   if (list?.getSnapshot === undefined) return '会话目录没有 list.getSnapshot（形状不符）'
   const snapshot = list.getSnapshot()

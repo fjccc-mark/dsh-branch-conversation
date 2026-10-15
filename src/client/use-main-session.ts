@@ -42,12 +42,92 @@ export interface ClientSessions {
 /** 模块级持有：入口安装一次，页面组件读取。 */
 let installed: ClientSessions | undefined
 
+/** 重试计时器（服务晚到时用）。 */
+let retryTimer: ReturnType<typeof setTimeout> | undefined
+
+/** 会话面就绪的订阅者（服务晚到时用来唤醒页面，不必手点「刷新」）。 */
+const readyListeners = new Set<() => void>()
+
+/**
+ * 订阅"会话面就绪"。已经就绪时立刻回调一次。
+ * @param listener - 就绪回调。
+ * @returns 取消订阅的函数。
+ */
+export function subscribeSessionsReady(listener: () => void): () => void {
+  if (installed !== undefined) {
+    listener()
+    return () => {}
+  }
+  readyListeners.add(listener)
+  return () => {
+    readyListeners.delete(listener)
+  }
+}
+
+/** 会话面到手后唤醒所有订阅者。 */
+function announceReady(): void {
+  for (const listener of [...readyListeners]) {
+    try {
+      listener()
+    } catch {
+      // 单个订阅者出错不影响其他订阅者。
+    }
+  }
+  readyListeners.clear()
+}
+
 /**
  * 安装会话目录面（由客户端入口调用）。
+ *
+ * 真机实测（2026-10-15）：`sessions` 服务由 `@deepseek-ai/dsh-api-session-controller` 的
+ * `ClientSessions` 构造函数 `provide("sessions", …)` 提供，而它自己还要等
+ * `connection / fileUpload / typert / remote.session …` 一串服务——所以**它可能比我们晚**。
+ * 于是这里不能只在入口取一次：拿不到就留个钩子，稍后重试。
  * @param sessions - 从客户端上下文取到的会话面；取不到时传 undefined。
  */
 export function installSessionsFace(sessions: ClientSessions | undefined): void {
   installed = sessions
+}
+
+/**
+ * 开始重试取会话面，直到拿到为止（最多约 15 秒）。
+ *
+ * 组件不主动轮询；重试只发生在"确实没拿到"的情况下，且拿到就停。
+ * @param read - 每次重试时重新读服务（由入口闭包提供，内部只用 `ctx.get`，永不抛）。
+ * @returns 停止重试的函数（组件卸载或拿到服务时调用）。
+ */
+export function retrySessionsFace(read: () => ClientSessions | undefined): () => void {
+  if (installed !== undefined) return () => {}
+  let attempts = 0
+  const stop = (): void => {
+    if (retryTimer !== undefined) {
+      clearTimeout(retryTimer)
+      retryTimer = undefined
+    }
+  }
+  const tick = (): void => {
+    attempts += 1
+    const next = read()
+    if (next !== undefined) {
+      installed = next
+      stop()
+      announceReady()
+      return
+    }
+    if (attempts >= 30) {
+      stop()
+      return
+    }
+    retryTimer = setTimeout(tick, 500)
+  }
+  stop()
+  retryTimer = setTimeout(tick, 500)
+  return stop
+}
+
+/** 会话面是否已经到手（面板据此区分"还没就绪"与"确实不可用"）。 */
+export function sessionsFaceReady(): boolean {
+  return installed !== undefined
 }
 
 /** 读当前安装的会话面（诊断用）。 */
@@ -80,16 +160,29 @@ export function mainViewSessionIdOf(snapshot: SessionListSnapshot | undefined): 
 export function useMainViewSessionId(): string | null {
   const [sessionId, setSessionId] = useState<string | null>(null)
   useEffect(() => {
-    const list = installed?.list
-    if (list?.getSnapshot === undefined) {
-      setSessionId(null)
-      return
+    let unsubscribeList: (() => void) | undefined
+    const attach = (): void => {
+      const list = installed?.list
+      if (list?.getSnapshot === undefined) {
+        setSessionId(null)
+        return
+      }
+      const update = (): void => {
+        setSessionId(mainViewSessionIdOf(list.getSnapshot?.()))
+      }
+      update()
+      unsubscribeList = list.subscribe?.(update)
     }
-    const update = (): void => {
-      setSessionId(mainViewSessionIdOf(list.getSnapshot?.()))
+    attach()
+    // 服务晚到时（会话控制器比我们后激活）自动重挂，不必让用户手点「刷新」。
+    const offReady = subscribeSessionsReady(() => {
+      unsubscribeList?.()
+      attach()
+    })
+    return () => {
+      offReady()
+      unsubscribeList?.()
     }
-    update()
-    return list.subscribe?.(update)
   }, [])
   return sessionId
 }
