@@ -97,6 +97,12 @@ export function apply(ctx: Context, config?: Partial<Config>): void {
 
   scope.logger?.info?.(`[${name}] 存储根 ${settings.storageRoot}；http=${settings.http ? 'on' : 'off'}`)
 
+  // 启动时把存储根建出来：否则第一次打开面板会看到"存储不可写"的假降级（真机实测，
+  // 目录只在首次写入时才创建，而诊断里的 writable 是当场探测的）。
+  void store.ensureRoot().then((ready) => {
+    if (!ready) log(`存储根不可用（只读或路径不存在）：${settings.storageRoot}；功能降级为只读`)
+  })
+
   if (!settings.http) return
 
   const deps: RouteDeps = {
@@ -136,7 +142,7 @@ export function apply(ctx: Context, config?: Partial<Config>): void {
       // 不是 Fetch 的 Request/Response；这里做一次适配再交给路由层。
       handler: (request: Request, response?: unknown) => dispatch(deps, request, response),
     })
-    ;(webCtx.effect ?? scope.effect)?.(() => dispose, `${name}: /${BRANCH_ROUTE_PREFIX} 路由`)
+    ;(webCtx.effect ?? scope.effect)?.(() => dispose, `${name}: ${BRANCH_ROUTE_PREFIX} 路由`)
   }
 
   const injectInto = (scope as { inject?: (names: string[], callback: (childCtx: never) => void) => void })

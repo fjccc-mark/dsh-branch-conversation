@@ -13,6 +13,7 @@ import { stat } from 'node:fs/promises'
 import {
   BRANCH_TREE_SCHEMA,
   TREE_INDEX_ID,
+  serviceOf,
   type BranchApiError,
   type BranchCreateResult,
   type BranchNode,
@@ -241,7 +242,11 @@ export class BranchService {
     const nodeId = this.nextNodeId()
     const write = await this.store.update(treeId, (current) => {
       const document = current ?? emptyTree(treeId, parentSessionId, parentFacts)
-      const existing = this.nodeOfSession(document, parentSessionId)
+      // 真机回归：首次通过 create 进入一条**已有历史**的会话时，必须把父会话已有的轮次一起补成
+      // 节点，否则树上只剩"最后一个轮次 + 新分支"，前面的对话凭空消失（M1 假会话面只有 1 轮，
+      // 所以这个缺陷只在真机暴露）。
+      const synced = this.syncTurns(document, parentSessionId, parentFacts.turns)
+      const existing = this.nodeOfSession(synced, parentSessionId)
       const anchorSeq = parentFacts.turns.find((turn) => turn.turn === request.parentTurn)?.endSeq ?? null
       const parentNode: BranchNode =
         existing ?? {
@@ -270,7 +275,7 @@ export class BranchService {
         file: null,
       }
 
-      const nodes = upsertNodes(document.nodes, parentNode, childNode)
+      const nodes = upsertNodes(synced.nodes, parentNode, childNode)
       const withChildren: BranchNode = {
         ...(nodes.find((node) => node.id === parentNode.id) ?? parentNode),
         children: unique([...(parentNode.children ?? []), childNode.id]),
@@ -320,29 +325,47 @@ export class BranchService {
     const treeId = (await this.resolveTreeId(sessionId)) ?? newTreeId(sessionId)
     const write = await this.store.update(treeId, (current) => {
       const document = current ?? emptyTree(treeId, sessionId, facts)
-      const nodes = [...document.nodes]
-      let latest = this.latestTurnOf(document, sessionId)
-      for (const turn of facts.turns) {
-        if (latest !== null && turn.turn <= latest) continue
-        nodes.push({
-          id: this.nextNodeId(),
-          sessionId,
-          turn: turn.turn,
-          anchorSeq: turn.endSeq,
-          kind: 'qa',
-          label: `第 ${turn.turn} 轮`,
-          collapsed: false,
-          orphan: false,
-          children: [],
-          file: null,
-        })
-        latest = turn.turn
-      }
-      return { ...document, nodes }
+      return this.syncTurns(document, sessionId, facts.turns)
     })
     if (!write.ok) throw writeFailure(write.error)
     await this.rememberSession(treeId, [sessionId])
     return this.viewOfSession(sessionId)
+  }
+
+  /**
+   * 把某个会话缺失的轮次补成节点（幂等：已有同轮次节点就不重复添加）。
+   *
+   * 抽成共享实现，是因为 `adopt` 与 `create` 都需要它：真机回归发现，如果只有 `adopt` 铺轮次，
+   * 那么"在一条有历史的会话上第一次建分支"会把前面的轮次整段丢掉。
+   * @param document - 当前树文档。
+   * @param sessionId - 要补轮次的会话。
+   * @param turns - 该会话已完成轮次（来自 `inspect`）。
+   * @returns 补完的新文档（不改原对象）。
+   */
+  private syncTurns(
+    document: BranchTreeDocument,
+    sessionId: string,
+    turns: readonly { readonly turn: number; readonly endSeq: number }[],
+  ): BranchTreeDocument {
+    const nodes = [...document.nodes]
+    let latest = this.latestTurnOf(document, sessionId)
+    for (const turn of turns) {
+      if (latest !== null && turn.turn <= latest) continue
+      nodes.push({
+        id: this.nextNodeId(),
+        sessionId,
+        turn: turn.turn,
+        anchorSeq: turn.endSeq,
+        kind: 'qa',
+        label: `第 ${turn.turn} 轮`,
+        collapsed: false,
+        orphan: false,
+        children: [],
+        file: null,
+      })
+      latest = turn.turn
+    }
+    return { ...document, nodes }
   }
 
   /**
@@ -612,18 +635,18 @@ export class BranchService {
   }> {
     const probe = await this.store.probeRoot()
     const ids = (await this.store.listTreeIds()).filter((id) => id !== TREE_INDEX_ID)
-    const record = this.deps.ctx as {
-      sessions?: { create?: unknown }
-      sessionController?: { list?: unknown }
-      agentPresets?: { resolve?: unknown }
-    }
+    // 真机实测：未 inject 的服务属性访问会抛 `cannot get property "…" without inject`，
+    // 所以探测一律走 serviceOf（永不抛），否则整条 diagnostics 会变成 500。
+    const sessions = serviceOf<{ create?: unknown }>(this.deps.ctx, 'sessions')
+    const sessionController = serviceOf<{ list?: unknown }>(this.deps.ctx, 'sessionController')
+    const agentPresets = serviceOf<{ resolve?: unknown }>(this.deps.ctx, 'agentPresets')
     return {
       storageRoot: this.store.storageRoot,
       root: probe,
       treeCount: ids.length,
-      sessions: typeof record.sessions?.create === 'function',
-      sessionController: typeof record.sessionController?.list === 'function',
-      agentPresets: typeof record.agentPresets?.resolve === 'function',
+      sessions: typeof sessions?.create === 'function',
+      sessionController: typeof sessionController?.list === 'function',
+      agentPresets: typeof agentPresets?.resolve === 'function',
     }
   }
 }

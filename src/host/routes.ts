@@ -150,9 +150,10 @@ export async function handleBranchRoute(deps: RouteDeps, request: Request): Prom
 /** 请求体不是合法 JSON 对象。 */
 class RequestBodyError extends Error {}
 
-/** 把 `/branch/xxx` 前缀剥掉，得到子路由名。 */
+/** 把 `${BRANCH_ROUTE_PREFIX}/xxx` 前缀剥掉，得到子路由名。 */
 function routeOf(pathname: string): string {
-  return pathname.replace(/^\/+/, '').replace(/^branch\/?/, '').replace(/\/+$/, '')
+  const withoutPrefix = pathname.replace(/^\/+/, '').replace(/^branch\/?/, '')
+  return withoutPrefix.replace(/\/+$/, '')
 }
 
 /** 解析请求体；非法时抛 `RequestBodyError`。 */

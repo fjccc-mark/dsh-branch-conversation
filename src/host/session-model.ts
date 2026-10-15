@@ -6,7 +6,7 @@
  * @module dsh-branch-conversation/host/session-model
  */
 
-import type { SessionFacts, SessionTurnFact } from '../core/types.ts'
+import { serviceOf, type SessionFacts, type SessionTurnFact } from '../core/types.ts'
 
 /** 一个已完成轮次在会话事件流里的样子（只声明我们读的字段）。 */
 interface RawEvent {
@@ -17,7 +17,14 @@ interface RawEvent {
 
 /** host 侧可用的会话能力（全部按需探测，不写进 inject）。 */
 export interface SessionModel {
-  /** `ctx.sessionController`：列表、inspect、prompt 等 Remote 面。 */
+  /**
+   * `ctx.sessionController`：列表、inspect、prompt 等 Remote 面。
+   *
+   * **必须保留服务对象、并带 `this` 调用**：真机实测（2026-10-15），这些方法是 typert Remote
+   * 方法（服务上挂着 `@deepseek-ai/dsh-typert-protocol/remote-methods`），把 `controller.list`
+   * 摘出来后裸调用会得到 `Cannot read properties of undefined (reading 'list')`——
+   * 形如 `const { list } = controller; list(...)` 的写法在真机上必然失败。
+   */
   readonly controller: {
     list: (request: unknown, signal: AbortSignal) => Promise<unknown>
     inspect: (sessionId: string, signal?: AbortSignal) => Promise<unknown>
@@ -26,7 +33,10 @@ export interface SessionModel {
     canOpenWorkspacePath?: () => boolean
     openWorkspacePath?: (request: { path: string }, signal: AbortSignal) => Promise<unknown>
   }
-  /** `ctx.sessions`：SessionStore 面，用来建"无 seed + 有血缘"的子会话。 */
+  /**
+   * `ctx.sessions`：SessionStore 面，用来建"无 seed + 有血缘"的子会话。
+   * 同样必须带 `this` 调用（理由见上）。
+   */
   readonly store: {
     create: (id?: string, options?: unknown) => {
       readonly header?: {
@@ -39,31 +49,17 @@ export interface SessionModel {
   }
 }
 
-/** 探测会话能力；任一面缺失都返回 null（调用方据此给出 `unsupported`）。 */
-export function sessionModelOf(ctx: unknown): SessionModel | null {
-  const record = ctx as {
-    sessionController?: Partial<SessionModel['controller']>
-    sessions?: Partial<SessionModel['store']>
-  }
-  const controller = record.sessionController
-  const store = record.sessions
+/** 探测会话能力；任一面缺失都返回 null（调用方据此给出 `unsupported`）。 */export function sessionModelOf(ctx: unknown): SessionModel | null {
+  // 必须走 serviceOf：真机上未 inject 的服务属性访问会抛，而不是给 undefined。
+  const controller = serviceOf<Partial<SessionModel['controller']>>(ctx, 'sessionController')
+  const store = serviceOf<Partial<SessionModel['store']>>(ctx, 'sessions')
   if (controller?.list === undefined || controller.inspect === undefined) return null
   if (store?.create === undefined) return null
+  // 注意：这里**不**把方法摘出来，保留服务对象本身；调用方必须 `model.controller.list(...)`
+  // 这样 `this` 才是服务对象（真机实测：摘出来裸调用会 undefined）。
   return {
-    controller: {
-      list: controller.list as SessionModel['controller']['list'],
-      inspect: controller.inspect as SessionModel['controller']['inspect'],
-      ...(typeof controller.prompt === 'function'
-        ? { prompt: controller.prompt as NonNullable<SessionModel['controller']['prompt']> }
-        : {}),
-      ...(typeof controller.canOpenWorkspacePath === 'function'
-        ? { canOpenWorkspacePath: controller.canOpenWorkspacePath }
-        : {}),
-      ...(typeof controller.openWorkspacePath === 'function'
-        ? { openWorkspacePath: controller.openWorkspacePath }
-        : {}),
-    },
-    store: { create: store.create as SessionModel['store']['create'] },
+    controller: controller as SessionModel['controller'],
+    store: store as SessionModel['store'],
   }
 }
 

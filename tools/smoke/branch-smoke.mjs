@@ -61,7 +61,11 @@ track('apply 注册了 /branch 前缀路由', () => {
   apply(ctx, config)
   assert.ok(registered !== null, '没有注册任何路由')
   assert.equal(registered.kind, 'prefix')
-  assert.equal(registered.path, 'branch')
+  // 真机回归：前缀必须带前导斜杠。webserver 的 match() 是
+  //   pathname !== prefix && !pathname.startsWith(`${prefix}/`)
+  // 注册不带斜杠的 'branch' 会留下一个永远匹配不上的键（请求落到 SPA fallback：
+  // GET /branch/* → 404、非 GET → 405），而 register() 却成功返回 disposer。
+  assert.equal(registered.path, '/branch', 'host 路由前缀必须带前导斜杠')
 })
 
 track('apply 把路由 disposer 交给了 ctx.effect', () => {
@@ -94,6 +98,44 @@ track('未知路由返回 404 与 not-found 错误码', async () => {
   const body = await response.json()
   assert.equal(body.ok, false)
   assert.equal(body.error.code, 'not-found')
+})
+
+track('未 inject 的服务属性访问会抛错时，diagnostics 仍然可用（真机形状回归）', async () => {
+  // 真机实测：Cordis 上下文对未在 inject 里声明的服务属性访问**会抛**
+  // `cannot get property "sessions" without inject`，而不是返回 undefined。
+  // 老实现用 `record.sessions?.create` 做形状探测，真机上整条 diagnostics 直接 500。
+  let route = null
+  const throwingCtx = {
+    logger: { info: () => {}, warn: () => {} },
+    webServer: {
+      register: (input) => {
+        route = input
+        return () => {}
+      },
+    },
+    effect: () => {},
+    sessions: undefined,
+    get: () => undefined,
+  }
+  // 模拟 Cordis：读未声明的服务属性时抛错。
+  for (const name of ['sessions', 'sessionController', 'agentPresets']) {
+    Object.defineProperty(throwingCtx, name, {
+      get() {
+        throw new Error(`cannot get property "${name}" without inject`)
+      },
+    })
+  }
+  const dir = await mkdtemp(join(tmpdir(), 'branch-conv-probe-'))
+  apply(throwingCtx, Config({ storageRoot: dir, http: true }))
+  const response = await route.handler(
+    new Request('http://127.0.0.1:19387/branch/diagnostics', { method: 'POST' }),
+  )
+  assert.equal(response.status, 200, '服务探测抛错不应把 diagnostics 变成 500')
+  const body = await response.json()
+  assert.equal(body.ok, true, `信封异常：${JSON.stringify(body)}`)
+  assert.equal(body.value.sessions, false)
+  assert.equal(body.value.sessionController, false)
+  assert.equal(body.value.agentPresets, false)
 })
 
 const store = new TreeStore({ root: config.storageRoot })
@@ -134,6 +176,18 @@ track('写入过程不留临时文件（原子发布）', async () => {
   const files = await readdir(config.storageRoot)
   const leftovers = files.filter((name) => name.includes('.tmp-'))
   assert.deepEqual(leftovers, [], `残留临时文件：${leftovers.join(', ')}`)
+})
+
+track('ensureRoot 把存储根建出来（首开面板不再误报"不可写"）', async () => {
+  // 真机回归：目录只在首次写入时才创建，导致第一次打开面板的诊断是
+  // storage.exists=false / writable=false，看起来像"存储不可用"的假降级。
+  const fresh = await mkdtemp(join(tmpdir(), 'branch-conv-fresh-'))
+  const target = join(fresh, 'nested', 'v1')
+  const freshStore = new TreeStore({ root: target })
+  assert.deepEqual(await freshStore.probeRoot(), { exists: false, writable: false })
+  assert.equal(await freshStore.ensureRoot(), true)
+  const probe = await freshStore.probeRoot()
+  assert.deepEqual(probe, { exists: true, writable: true }, `ensureRoot 之后仍不可写：${JSON.stringify(probe)}`)
 })
 
 track('每棵树一把锁：同树两次并发写串行，后者看到前者的结果', async () => {

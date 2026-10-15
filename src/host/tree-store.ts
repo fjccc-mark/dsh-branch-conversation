@@ -175,6 +175,26 @@ export class TreeStore<TDocument extends { readonly schema: number } = BranchTre
     return next
   }
 
+  /**
+   * 确保存储根存在（启动时调用一次）。
+   *
+   * 真机实测（2026-10-15）：插件装好后**第一次**打开面板时，诊断会报
+   * `storage.exists=false, writable=false`——因为目录只在首次写入时才由 `writeAtomic` 的
+   * `mkdir` 创建。用户看到"存储不可写"的降级提示，其实是没建目录。启动时补一次 `mkdir`，
+   * 让诊断反映**真实**可写性。
+   *
+   * @returns 目录可用时为 `true`；不可用（如只读盘、不存在的盘符）时返回 `false`，
+   * 由调用方降级提示，不抛出。
+   */
+  async ensureRoot(): Promise<boolean> {
+    try {
+      await mkdir(this.root, { recursive: true })
+      return true
+    } catch {
+      return false
+    }
+  }
+
   /** 存储根是否存在且可写（诊断用；不创建目录）。 */
   async probeRoot(): Promise<{ readonly exists: boolean; readonly writable: boolean }> {
     try {
@@ -193,7 +213,8 @@ export class TreeStore<TDocument extends { readonly schema: number } = BranchTre
 }
 
 /** 树 id 只允许出现在文件名里的安全字符。 */
-function safeTreeId(treeId: string): string {  const cleaned = treeId.replace(/[^A-Za-z0-9._-]/g, '_')
+function safeTreeId(treeId: string): string {
+  const cleaned = treeId.replace(/[^A-Za-z0-9._-]/g, '_')
   return cleaned === '' ? 'unknown' : cleaned
 }
 

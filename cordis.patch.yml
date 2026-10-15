@@ -16,3 +16,8 @@
     - id: branch-conversation
       name: dsh-branch-conversation
       inject: ['webServer']
+      # 配置留空即用 schema 默认值（存储根 = $DSH_HOME/storages/branch-conversation/v1）。
+      # 需要改存储位置时在这里写，例如：
+      #   config:
+      #     storageRoot: 'D:\somewhere\branch-v1'
+      #     http: false          # 关掉 host 路由，只保留存储（排障用）

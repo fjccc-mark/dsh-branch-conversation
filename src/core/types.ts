@@ -14,8 +14,50 @@ export const BRANCH_TREE_SCHEMA = 1
 /** 官方侧边栏里的面板 id：`sidebar.panellist` 行与 `main` 页共用同一个 id。 */
 export const BRANCH_PANEL_ID = 'branch-conversation'
 
-/** 插件的 host 路由前缀（同源相对路径，不带前导斜杠）。 */
-export const BRANCH_ROUTE_PREFIX = 'branch'
+/**
+ * 插件的 host 路由前缀。
+ *
+ * **必须带前导斜杠**：真机实测（2026-10-15），webserver 的前缀匹配是
+ * `pathname !== prefix && !pathname.startsWith(`${prefix}/`)`，所以注册 `'branch'` 会在前缀表里留下
+ * 一个**永远匹配不上**的键——请求落到 SPA fallback，表现为 `GET /branch/* → 404`、非 GET → 405，
+ * 而 `register()` 本身成功返回 disposer（假象）。官方 client-modules 注册的正是 `'/plugins'`。
+ * 对照实验：注册 `'nolead'` → `match('/nolead') === undefined`；注册 `'/lead'` → 命中。
+ */
+export const BRANCH_ROUTE_PREFIX = '/branch'
+
+/**
+ * 安全地取一个**可选** Cordis 服务（拿不到就返回 `undefined`，绝不抛）。
+ *
+ * 真机实测（2026-10-15）：Cordis 的上下文对**未在 `inject` 里声明**的服务属性访问会直接抛
+ * `cannot get property "sessions" without inject`，而不是返回 `undefined`。所以"形状探测"
+ * 不能写成 `ctx.sessions?.create`，必须：
+ *   1. 先试属性读取（Cordis 的常规路径），抛错就当没有；
+ *   2. 再退到 `ctx.get(name)`（官方推荐的取值方式）。
+ *
+ * @param ctx - 任意上下文（host 的插件上下文，或测试里的假上下文）。
+ * @param name - 服务名，如 `sessions` / `sessionController` / `agentPresets`。
+ * @returns 服务对象或 `undefined`；永不抛出。
+ */
+export function serviceOf<T = unknown>(ctx: unknown, name: string): T | undefined {
+  if (ctx === null || ctx === undefined) return undefined
+  const record = ctx as Record<string, unknown>
+  try {
+    const direct = record[name]
+    if (direct !== undefined && direct !== null) return direct as T
+  } catch {
+    // 未 inject 的服务属性访问会抛：按"缺失"处理，继续退到 get()。
+  }
+  const get = record['get']
+  if (typeof get === 'function') {
+    try {
+      const viaGet = (get as (serviceName: string) => unknown).call(ctx, name)
+      if (viaGet !== undefined && viaGet !== null) return viaGet as T
+    } catch {
+      // get() 也不可用就当作缺失。
+    }
+  }
+  return undefined
+}
 
 /** 一个节点的种类。 */
 export type BranchNodeKind = 'qa' | 'file'
