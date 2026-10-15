@@ -69,13 +69,26 @@ DeepSeek Harness（DSH）插件：在官方侧边栏中新增一个**「分支�
 - 新增 [测试计划](docs/分支对话插件·测试计划.md)（网页端 + 桌面端用例）与
   [现状总结](docs/分支对话插件·现状总结.md)（一页看懂现状）。
 
+**页面形态量测轮完成**（本次）
+
+- **"窄屏不退化"（形态基线 `F-5` / 用例 `W-9.1`）从人工改成自动量测**：
+  `npm run layout-check` 用无头 Chromium 在 360 / 480 / 768 / 1280 / 1920 五档**布局宽**下渲染真实页面，
+  断言"无横向溢出 / 每行有轴线轨道 / 折叠三角与「＋」在容器内 / 每个节点行不宽过树容器 / 内容留在面板内滚动"，
+  **42/42 通过**；`npm run layout-shots` 另存五张验收截图。
+- **修掉 4 个真缺陷**（全部有回归用例，详见 [测试文档 §6.6](docs/分支对话插件·测试文档.md)）：
+  ① **`panel.css` 从来没到过浏览器**（加载器只取模块导出，不处理 CSS 副作用）→ 改为构建时内嵌
+  `window.__DSH_BRANCH_CSS__` + `apply()` 注入 `<style>`；② 窄屏整页横向溢出；
+  ③ 深树 10 层光轨道前缀就 356px → 轨道压缩为 `⋯ ` + 末 4 级；④ 极窄容器把折叠三角/「＋」挤出容器。
+- 冒烟增至 **76 项**（客户端产物套件 +3：样式发布/幂等/降级；布局套件 +1：轨道压缩）。
+
 **未完成**（见 [现状总结](docs/分支对话插件·现状总结.md) §6）
 
 - **真机主链路已通**：面板在浏览器里跑起来了——侧边栏有「分支对话」行，打开会话即自动折出轮次节点树，
   切换会话会自动接入对应的树（原先的"前缀路由不可达"阻塞点已定位为插件缺陷并修复，见测试文档 §6.5）。
 - **待人工核对的交互**：点节点切换、折叠持久化、文件节点（挂载/体检/系统程序打开）、三种导出按钮、孤儿升根。
 - **桌面端未开始**：`desktop` profile 由 Electron 独占，需在应用内插件管理器安装后重载才能用上新产物。
-- 真机端到端、窄屏与键盘可达性人工核对、M5 的从零安装验证。
+- **改过客户端产物后要重装/重启**：样式现在内嵌在 `lib/client.js` 里，host 启动时读过的产物不会自己刷新。
+- 真机端到端、键盘可达性人工核对、M5 的从零安装验证（窄屏排版已由 `npm run layout-check` 自动兜住）。
 
 **真机测试环境**：本插件已装入 `web` profile（`dsh plugin --profile web add link:<仓库>`）；
 撤掉用 `dsh plugin --profile web remove dsh-branch-conversation`。
@@ -113,15 +126,22 @@ dsh --profile branch-dev
 ```sh
 npm install --legacy-peer-deps         # 官方 SDK 的 peer 声明在 npm 下需要这个开关
 npm run typecheck                      # host + client 两个 program
-npm run build                          # tsdown（host ESM + client CJS）并给 client 套上加载器外壳
-npm run smoke                          # 四套冒烟：M0 12 项 + M1 14 项 + 产物 7 项 + 布局 8 项
-npm run preview                        # 浏览器打开面板静态预览，人工核对排版
+npm run build                          # tsdown（host ESM + client CJS）+ 套加载器外壳 + 内嵌 panel.css
+npm run smoke                          # 六套冒烟（76 项）：M0 14 + M1 14 + M4 15 + 产物 10 + 布局 10 + 导出 13
+npm run layout-check                   # 页面形态量测（42 项）：无头 Chromium 实量五档布局宽
+npm run layout-shots                   # 同上，另存五张验收截图到 artifacts/panel-preview/
+npm run preview                        # 打开早期静态预览页（排版目视；正式量测用 layout-check）
 ```
 
 - 构建与类型检查依赖官方 `@deepseek-ai/*` SDK。注意：**公开 npm 的版本线与运行时 CLI 不同号**
   （公开线是 `0.0.1-rc.1` / `0.1.2-alpha.2`，CLI 是 `0.2.0-rc.2`），`package.json` 按可获得的版本声明，
   运行门仍写 `dsh.engines.dsh >= 0.2.0-rc.2`。
 - 改 **host** 代码需要重启 profile；改 **client** 产物后刷新页面即可（有 watcher 时可 HMR）。
+- **页面样式靠产物自己带**：`panel.css` 由 `tools/build/wrap-client-bundle.mjs` 内嵌成
+  `window.__DSH_BRANCH_CSS__`，`src/client/style.ts` 在 `apply()` 时插成 `<style>`。
+  不要再写 `import './panel.css'`——加载器不处理 CSS 副作用（这正是之前"真机上一直没样式"的原因）。
+- `layout-check` 需要本机有 Chromium/Edge（可用 `DSH_BROWSER=<可执行文件>` 指定）；
+  没找到浏览器时会**跳过**并返回成功，不会伪装成通过。
 
 ## 架构一览
 
@@ -137,20 +157,25 @@ src/
   testing/fake-sessions.ts 按官方契约造假的会话面（供冒烟测试驱动真代码路径）
   client/
     index.ts               浏览器半入口：注册 sidebar.panellist 行 + main 页面，注入会话目录与导航面
+    style.ts               把构建内嵌的样式插成 <style>（幂等；**样式靠它才到浏览器**）
     panel.tsx              行图标、中央列页面（竖向流程图）、节点交互、建分支表单
-    tree-layout.ts         流程图布局纯函数（深度 / 轨道 / 折叠 / 标记）
+    tree-layout.ts         流程图布局纯函数（深度 / 轨道压缩 / 折叠 / 标记）
     navigation.ts          会话切换面（uiWorkspace.openSession 的模块级持有）
     branch-api.ts          host 路由客户端（文档相对路径，永不抛出）
     capability.ts          拉取 host 诊断
     use-main-session.ts    从会话目录快照取主视图会话（读不到就退化）
-    panel.css              页面样式（全局语义类名 .dsh-branch-*）
+    panel.css              页面样式（全局语义类名 .dsh-branch-*；窄容器适配 + 深树滚动）
 tools/
-  build/wrap-client-bundle.mjs  给 client 产物套 __ModuleLoader__ 外壳
+  build/wrap-client-bundle.mjs  套 __ModuleLoader__ 外壳 + 内嵌 panel.css
+  build/panel-preview.mjs       用真布局函数 + 真样式生成多宽度页面夹具
+  smoke/layout-check.mjs        无头 Chromium 形态量测（F-5 / W-9.1 自动化）
   smoke/branch-smoke.mjs        M0：存储与路由契约
   smoke/branch-m1-cases.mjs     M1：建子会话 / 节点派生 / 孤儿升根
-  smoke/client-bundle.mjs       M2：产物形状与座位注册
-  smoke/tree-layout.mjs         M2：流程图布局
-  preview/panel-preview.html    面板静态预览（人工核对排版）
+  smoke/branch-m4-cases.mjs     M4：失败恢复四场景 / 文件节点 / 导出路由
+  smoke/client-bundle.mjs       M2：产物形状、座位注册、样式投递
+  smoke/tree-layout.mjs         M2：流程图布局（含深树轨道压缩）
+  smoke/export.mjs              M4：三种导出纯函数
+  preview/panel-preview.html    早期静态预览（排版目视；正式量测用 layout-check）
 ```
 
 ### 关键设计决定（都有取证依据）
@@ -166,6 +191,11 @@ tools/
 - **子智能体不入树**：模型自己调用的 subagent（`origin === 'subagent'`）不计为节点。
 - **页面的官方接缝**：`sidebar.panellist`（行）+ `main`（中央列页），同一个 id 配对；
   两者都用 `ctx.slots.inject` 注册，壳没有该座位时自然降级、不崩。
+- **样式必须随产物发布**：浏览器半的加载器只取模块**导出**，不会执行 `import './x.css'` 这类副作用。
+  所以 `panel.css` 在构建后由包装脚本内嵌为 `window.__DSH_BRANCH_CSS__`，运行时由 `apply()` 插成 `<style>`。
+  之前正是漏了这一步，真机上一直是裸样式而预览页看不出来（预览页用 `<link>` 直接引 CSS）。
+- **窄屏按"容器"而不是"视口"适配**：中央列有多宽取决于官方侧边栏占多少，所以用
+  `container-type: inline-size` + `@container` 做降级；深树轨道超过 4 级会被压成 `⋯ + 末 4 级`。
 - **文件打开走系统默认程序**：`sessionController.openWorkspacePath()`，不做应用内预览。
 
 ## 许可

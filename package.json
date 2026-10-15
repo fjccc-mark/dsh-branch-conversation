@@ -66,6 +66,8 @@
     "typecheck": "npm run typecheck:host && npm run typecheck:client",
     "build": "tsdown && node tools/build/wrap-client-bundle.mjs lib/client.js dsh-branch-conversation",
     "smoke": "node tools/smoke/branch-smoke.mjs && node tools/smoke/branch-m1-cases.mjs && node tools/smoke/branch-m4-cases.mjs && node tools/smoke/client-bundle.mjs && node tools/smoke/tree-layout.mjs && node tools/smoke/export.mjs",
+    "layout-check": "node tools/smoke/layout-check.mjs",
+    "layout-shots": "node tools/smoke/layout-check.mjs --shots",
     "preview": "start tools/preview/panel-preview.html"
   },
   "license": "MIT",

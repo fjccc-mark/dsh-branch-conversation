@@ -8,7 +8,10 @@
  *   3. 导出形状正确：`apply` 是函数、`inject` 是字符串数组且含 `slots`；
  *   4. 用假的 ctx 调 `apply()`：`sidebar.panellist` 与 `main` 两个座位都被注册，id/key 一致；
  *   5. 壳不提供 `slots` 时不抛错（自然降级）；拿不到 sessions 也不抛错；
- *   6. 行图标与页面组件都能作为 React 元素渲染（用假 React 驱动）。
+ *   6. 行图标与页面组件都能作为 React 元素渲染（用假 React 驱动）；
+ *   7. **样式确实随产物发布**：产物带 `__DSH_BRANCH_CSS__`，`apply()` 会把它插成
+ *      一个带 `data-dsh-branch-style` 的 `<style>`，且重复 `apply()` 不会插第二份。
+ *      （这条是回归项：早先版本根本没把 `panel.css` 发到浏览器，样式只在预览页里存在。）
  *
  * 用法：node tools/smoke/client-bundle.mjs
  */
@@ -33,6 +36,34 @@ const track = (name, fn) =>
   )
 
 const source = await readFile(bundlePath, 'utf8')
+
+/**
+ * 假文档：只实现插件样式注入用到的部分（`head.appendChild` + `querySelector`）。
+ * @returns {{ document: any; styles: any[] }} 假 document 与它收到过的 `<style>`。
+ */
+function installFakeDocument() {
+  const styles = []
+  const fakeDocument = {
+    head: {
+      appendChild: (element) => {
+        styles.push(element)
+        return element
+      },
+    },
+    createElement: (tag) => ({
+      tagName: tag.toUpperCase(),
+      attributes: {},
+      textContent: '',
+      setAttribute(name, value) {
+        this.attributes[name] = value
+      },
+    }),
+    querySelector: (selector) =>
+      selector.includes('data-dsh-branch-style') && styles.length > 0 ? styles[0] : null,
+  }
+  globalThis.document = fakeDocument
+  return { document: fakeDocument, styles }
+}
 
 /** 假 React：只需要能满足 hooks 调用与元素创建。 */
 const reactStub = {
@@ -70,9 +101,16 @@ function installFakeWindow() {
   return { fakeWindow, loaded }
 }
 
-/** 用假 window 执行产物源码；返回捕获到的定义（会抛错时直接冒出来）。 */
+/**
+ * 用假 window 执行产物源码；返回捕获到的定义（会抛错时直接冒出来）。
+ *
+ * 注意：假 window 必须挂在 **globalThis** 上，不能只当 `new Function` 的形参——
+ * 产物里的 `window.__DSH_BRANCH_CSS__` 是直接引用全局 `window` 的，
+ * 只传形参会让样式常量看起来"没注入"（这条曾被自己的断言坑过一次）。
+ */
 function evaluateBundle() {
   const { fakeWindow, loaded } = installFakeWindow()
+  globalThis.window = fakeWindow
   const requireModule = (name) => {
     requestedModules.push(name)
     if (!moduleTable.has(name)) {
@@ -194,6 +232,43 @@ track('行图标与页面组件都能作为 React 元素渲染（假 React 驱�
   assert.ok(pageElement !== null && typeof pageElement === 'object', '页面没有返回元素')
   assert.equal(pageElement.type, 'div')
   assert.equal(pageElement.props['data-dsh-plugin'], 'branch-conversation')
+})
+
+track('样式随产物发布：__DSH_BRANCH_CSS__ 有内容，且关键窄屏规则都在里面', () => {
+  // 构建时把样式挂在 **window** 上（浏览器里它就是全局对象）；测试里的假 window 也是同一个。
+  const css = globalThis.window?.__DSH_BRANCH_CSS__
+  assert.equal(typeof css, 'string', '产物没有设置 window.__DSH_BRANCH_CSS__')
+  assert.ok(css.length > 1000, `样式太短，疑似没注入：${css.length} 字符`)
+  for (const rule of ['.dsh-branch-page', '.dsh-branch-tree-row', 'container-type', 'overflow-x']) {
+    assert.ok(css.includes(rule), `样式里缺少 ${rule}`)
+  }
+  assert.equal(typeof exports.installPanelStyle, 'function', '没有导出 installPanelStyle')
+  assert.equal(typeof exports.bundledCss, 'function', '没有导出 bundledCss')
+  assert.equal(exports.bundledCss(), css, 'bundledCss() 应与注入的常量一致')
+  assert.equal(exports.STYLE_MARKER, 'data-dsh-branch-style')
+})
+
+track('apply() 把样式插进文档；重复 apply() 不会插第二份（幂等）', () => {
+  const { styles } = installFakeDocument()
+  const slots = {
+    inject: (_key, callback) => callback(),
+    register: () => () => {},
+  }
+  exports.apply({ slots })
+  assert.equal(styles.length, 1, `应恰好插入 1 个 <style>，实际 ${styles.length}`)
+  assert.equal(styles[0].attributes['data-dsh-branch-style'], '')
+  assert.ok(String(styles[0].textContent).includes('.dsh-branch-page'), '插进去的不是面板样式')
+
+  // 第二次 apply（相当于页面重载/HMR）：querySelector 命中已有样式，不再追加。
+  exports.apply({ slots })
+  assert.equal(styles.length, 1, `重复 apply 不应再插入，实际 ${styles.length} 个`)
+})
+
+track('没有 document 时样式注入安全降级（不抛错）', () => {
+  delete globalThis.document
+  assert.equal(exports.installPanelStyle('.x{}'), false)
+  assert.doesNotThrow(() => exports.apply({ slots: { inject: (_k, cb) => cb(), register: () => () => {} } }))
+  installFakeDocument()
 })
 
 // ---------------------------------------------------------------------------

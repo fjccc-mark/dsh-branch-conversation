@@ -47,6 +47,28 @@ export interface TreeLayout {
   readonly hasOrphans: boolean
 }
 
+/** 轨道字符最多铺几级（超出后压缩，见 `MAX_RAILS`）。 */
+const MAX_RAILS = 4
+
+/** 轨道被压缩时用的省略标记。 */
+const RAIL_ELLIPSIS = '⋯ '
+
+/**
+ * 压缩过深的轨道前缀。
+ *
+ * 为什么必须压：一级轨道是 3 个等宽字符（约 24px），10 层就是 240px+，
+ * 而中央列在窄屏下只有 300~400px——**光缩进就能把节点标题挤到容器外**（F-5 的反例）。
+ * 压缩口径：保留最后 `MAX_RAILS` 级（末级的 `├─/└─` 分支符号一定看得见），
+ * 前面加一个 `⋯ ` 表示"上面还有几级没画"。级数信息不丢——节点自己的「第 N 轮」与深度缩进
+ * 仍能从展开后的父行看出来，导出（JSON/Markdown/Mermaid）里也仍是完整层级。
+ * @param rails - 原始轨道前缀。
+ * @returns 压缩后的轨道前缀。
+ */
+function compressRails(rails: readonly string[]): readonly string[] {
+  if (rails.length <= MAX_RAILS) return rails
+  return [RAIL_ELLIPSIS, ...rails.slice(-MAX_RAILS)]
+}
+
 /**
  * 把树视图排成流程图行。
  *
@@ -90,7 +112,7 @@ export function layoutTree(view: BranchTreeView | null): TreeLayout {
       filePath: node.file?.path ?? null,
       fileMissing: node.file?.missing ?? false,
       current: node.id === view.currentNodeId,
-      rails,
+      rails: compressRails(rails),
     })
 
     visibleChildren.forEach((child, index) => {

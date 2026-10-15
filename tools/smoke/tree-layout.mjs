@@ -189,6 +189,32 @@ track('多根（升根后的树）：每个根都从深度 0 开始', () => {
   )
 })
 
+track('深树压缩：12 层缩进不会把轨道铺成"超长空白"（窄屏不退化，F-5）', () => {
+  // 造一条 12 层的链：每层都是上一层的唯一子节点。
+  const nodes = [node('n1', { turn: 1, children: ['n2'] })]
+  for (let depth = 2; depth <= 12; depth += 1) {
+    nodes.push(
+      node(`n${depth}`, { turn: depth, children: depth === 12 ? [] : [`n${depth + 1}`] }),
+    )
+  }
+  const { rows } = layoutTree(view(nodes))
+  const deepest = rows.find((row) => row.id === 'n12')
+
+  assert.equal(rows.length, 12, `12 层应产生 12 行，实际 ${rows.length}`)
+  assert.equal(deepest.depth, 11, '深度信息不能被压缩改掉')
+  // 轨道是"每级一行"的数组；压缩后应只剩省略标记 + 最后 4 级，共 5 项。
+  assert.equal(deepest.rails.length, 5, `最深行的轨道项应为 5（省略 + 4 级），实际 ${deepest.rails.length}`)
+  assert.ok(deepest.rails[0].includes('⋯'), `首项应是省略标记，实际 ${JSON.stringify(deepest.rails[0])}`)
+  assert.equal(deepest.rails.at(-1).trim(), '└─', '末级仍要保留分支符号')
+  // 轨道字符总数要有上限：否则窄屏下光缩进就能把标题挤出容器。
+  // 5 项 = "⋯ " + 4 级 ×（一级 3~7 字符），最长 22 字符；按 12px 等宽字约 7px/字符 算约 154px，
+  // 已能塞进 360px 中央列（真正"塞不塞得下"由 tools/smoke/layout-check.mjs 在真实浏览器里量）。
+  const maxRails = Math.max(...rows.map((row) => row.rails.join('').length))
+  assert.ok(maxRails <= 24, `轨道总字符数应被压到 24 以内，实际 ${maxRails}`)
+  // 浅层（<=4 级）不受影响，仍是完整轨道。
+  assert.equal(rows.find((row) => row.id === 'n4').rails.length, 3, '第 4 层不应被压缩')
+})
+
 // ---------------------------------------------------------------------------
 
 const settled = await Promise.all(results)

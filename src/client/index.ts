@@ -15,11 +15,13 @@ import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import { BRANCH_PANEL_ID } from '../core/types.ts'
 import { installNavigation, retryNavigation } from './navigation.ts'
 import { BranchPanelIcon, BranchPanelPage } from './panel.tsx'
+import { installPanelStyle } from './style.ts'
 import { installSessionsFace, retrySessionsFace, useMainViewSessionId, type ClientSessions } from './use-main-session.ts'
 
 export { BranchPanelIcon, BranchPanelPage } from './panel.tsx'
 export type { BranchPanelProps } from './panel.tsx'
 export { useCapabilityReport, type CapabilityReport } from './capability.ts'
+export { bundledCss, installPanelStyle, STYLE_MARKER } from './style.ts'
 export { branchApi } from './branch-api.ts'
 export type { BranchCreateValue, BranchTreeView } from './branch-api.ts'
 export { canOpenSession, installNavigation, openSessionById } from './navigation.ts'
@@ -125,6 +127,8 @@ function reportFailure(detail: string): void {
 /** 真正的入口逻辑；任何异常都由 {@link apply} 报告后重抛。 */
 function applyOrThrow(ctx: ClientContext): void {
   const scope = ctx as unknown as ClientScope
+  // 样式先注入：即使后面座位注册失败（例如壳没有 slots），页面样式也已经就位。
+  installPanelStyle()
   const slots = serviceOf<SlotFace>(scope, 'slots')
   if (slots === undefined) {
     reportFailure('没有 slots 服务（壳没有注册座位 API），已跳过页面注册（自然降级）')

@@ -3,3 +3,7 @@ lib/
 *.tsbuildinfo
 *.log
 .DS_Store
+
+# 页面夹具与验收截图（由 npm run layout-check / layout-shots 生成，不入库）
+artifacts/
+

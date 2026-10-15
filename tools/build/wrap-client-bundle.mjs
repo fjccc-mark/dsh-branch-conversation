@@ -22,6 +22,11 @@
  * 官方插件的产物同样是包名（如 `id: "dshmarket"`、`id: "@deepseek-ai/dsh-client-ui-sidebar"`）。
  *
  * 幂等：已经包装过的产物不会被二次包装。
+ *
+ * 另外把 `src/client/panel.css` 作为字符串常量 `__DSH_BRANCH_CSS__` 塞进产物：
+ * 加载器只认模块导出，不会处理 CSS 副作用，所以样式必须由产物自己带、由 `src/client/style.ts`
+ * 在 `apply()` 时插进文档。样式与产物同文件，也就不存在"忘了发 CSS / 静态资源路径猜错"。
+ *
  * 用法：node tools/build/wrap-client-bundle.mjs [产物路径] [包名]
  * @module dsh-branch-conversation/tools/wrap-client-bundle
  */
@@ -36,9 +41,20 @@ const root = resolve(here, '..', '..')
 const bundlePath = resolve(root, process.argv[2] ?? 'lib/client.js')
 const pluginId = process.argv[3] ?? 'dsh-branch-conversation'
 
+/** 页面样式表（与 `src/client/style.ts` 约定的全局名配套）。 */
+const cssPath = resolve(root, 'src', 'client', 'panel.css')
+const css = readFileSync(cssPath, 'utf8')
+
 const original = readFileSync(bundlePath, 'utf8')
 
-if (original.includes('__ModuleLoader__.load')) {
+/**
+ * 判"是否已经包装过"：只能看**外壳特征**，不能只看正文里有没有 `__ModuleLoader__.load`
+ * ——`src/client/style.ts` 的注释里也写着这串字，早先的宽判据因此在新产物上误判"已包装"并跳过，
+ * 结果样式常量根本没进产物（差点带着"样式没发布"的缺陷过测）。
+ * 外壳特征：文件以 `window.__DSH_BRANCH_CSS__` 打头，且紧跟着 `window.__ModuleLoader__.load({`。
+ */
+const WRAPPER_SIGNATURE = /^window\.__DSH_BRANCH_CSS__ = ".*?";\nwindow\.__ModuleLoader__\.load\(\{/s
+if (WRAPPER_SIGNATURE.test(original)) {
   console.log(`✓ ${bundlePath} 已经包装过，跳过`)
   process.exit(0)
 }
@@ -68,5 +84,12 @@ ${indented}
 ${mapComment}
 `
 
-writeFileSync(bundlePath, wrapped, 'utf8')
-console.log(`✓ 已包装 ${bundlePath}（id=${pluginId}，正文 ${body.length} 字符）`)
+// 样式常量放在外壳**之前**：loader 的 factory 是懒执行的，全局必须先就位。
+const withCss = `window.__DSH_BRANCH_CSS__ = ${JSON.stringify(css)};
+${wrapped}`
+
+writeFileSync(bundlePath, withCss, 'utf8')
+console.log(
+  `✓ 已包装 ${bundlePath}（id=${pluginId}，正文 ${body.length} 字符，` +
+    `样式 ${css.length} 字符来自 ${cssPath.replace(`${root}\\`, '')}）`,
+)
