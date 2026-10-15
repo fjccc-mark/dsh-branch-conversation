@@ -45,7 +45,9 @@ export default defineConfig([
   },
   {
     name: 'client',
-    entry: { 'client/index': 'src/client/index.ts' },
+    // 输出名必须与 `exports["./client"]` 一致：官方 client-modules 直接按该导出去解析产物路径
+    // （真机实测：它读的是 `lib/client.js`，不是 `lib/client/index.js`）。
+    entry: { client: 'src/client/index.ts' },
     outDir: 'lib',
     format: 'cjs',
     // 浏览器目标：react / @deepseek-ai/* 都是模块表提供的平台模块。

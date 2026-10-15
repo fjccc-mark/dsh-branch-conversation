@@ -41,10 +41,15 @@ DeepSeek Harness（DSH）插件：在官方侧边栏中新增一个**「分支�
   「▾/▸」折叠（新增 `/branch/set-collapsed`，状态持久化）；文件节点点击走 `/branch/open-file` → 系统默认程序。
 - 布局冒烟 **8/8**（真实加载客户端产物）。
 
-**未完成**（见设计文档 §6.7.3）
+**未完成**（见设计文档 §6.7.3 / §6.7.4）
 
-- **真机渲染仍待验证**：需要一个装了本插件的 profile 实例（本机 `web` profile 未装，且 `dsh web` 有启动令牌 + 签名 cookie 的鉴权栅栏）。
+- **真机阻塞点**：插件的前缀路由在真机（`web` profile，3080）上**注册成功但请求到不了 handler**
+  （`GET /branch/diagnostics` → 404，`POST` → 405；官方 `/api` 前缀可达）。桌面实例上已装插件的
+  `/git/*` 同样不可达，说明是组合层面的问题，已在 §6.7.3 记录完整证据与下一步排查方向。
 - 三种导出（JSON / Markdown / Mermaid）、孤儿升根的 UI 入口、窄屏与键盘可达性的人工核对。
+
+**真机测试环境**：本插件已装入 `web` profile（`dsh plugin --profile web add link:<仓库>`）；
+撤掉用 `dsh plugin --profile web remove dsh-branch-conversation`。
 
 ## 目标平台
 

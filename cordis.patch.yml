@@ -4,8 +4,15 @@
 #   - node 半（exports "."）在 host 进程运行：树文档存储 + /branch/* 路由
 #   - 浏览器半（package.json 的 dsh.client 声明 + exports "./client"）在 Web GUI 加载
 #
+# 关键：`inject` 必须声明在**这一行**上。真机实测，DSH 的 loader 用的是
+# `entry.options.inject`（见 cordis-plugin-loader 里的
+# `Inject.resolve(fiber.entry.options.inject, fiber.inject)`），**不是**模块导出的 `inject`。
+# 不写在这里，插件里的 `ctx.webServer` 会直接抛
+# `cannot get property "webServer" without inject`，整条 fiber 挂掉。
+#
 # 激活方式（profile 名按实际替换）：
 #   dsh plugin --profile <profile> add link:<本仓库绝对路径>
 - insert:
     - id: branch-conversation
       name: dsh-branch-conversation
+      inject: ['webServer']

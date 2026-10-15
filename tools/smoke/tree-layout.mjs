@@ -26,7 +26,7 @@ globalThis.window = {
     },
   },
 }
-await import(pathToFileURL(resolve(root, 'lib/client/index.js')).href)
+await import(pathToFileURL(resolve(root, 'lib/client.js')).href)
 assert.ok(definition !== null, '产物没有调用 __ModuleLoader__.load()')
 
 // 2) 用宽容的模块表执行工厂，拿到导出。

@@ -1,5 +1,5 @@
 /**
- * 浏览器半产物冒烟：在一个最小的"模块表 + window"环境里加载 `lib/client/index.js`，
+ * 浏览器半产物冒烟：在一个最小的"模块表 + window"环境里加载 `lib/client.js`，
  * 验证它确实是 DSH Web shell 认识的那套形状，并且真的能注册进座位。
  *
  * 覆盖：
@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const root = resolve(here, '..', '..')
-const bundlePath = resolve(root, 'lib/client/index.js')
+const bundlePath = resolve(root, 'lib/client.js')
 
 const results = []
 const track = (name, fn) =>

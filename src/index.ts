@@ -37,8 +37,10 @@ export const name = 'branch-conversation'
 /**
  * 必需服务。
  *
- * 只声明 `webServer`：路由没有它就无法注册。`sessions` / `sessionController` / `agentPresets`
- * 故意不放进 `inject`——它们缺失时应降级并诊断，而不是让整个插件 fiber 挂起（保守设计 §4）。
+ * `webServer` 必须声明在 `inject` 里：真机实测，Cordis 的上下文对**未声明**的服务属性访问会直接抛
+ * `cannot get property "webServer" without inject`（不是返回 undefined），所以"只做形状探测"在这里
+ * 必须写成先 inject、再用 `ctx.get()` 取可选值。`sessions` / `sessionController` / `agentPresets`
+ * 故意不 inject——它们缺失时应降级并诊断，而不是让整个插件 fiber 挂起（保守设计 §4）。
  */
 export const inject = ['webServer']
 
@@ -60,15 +62,24 @@ interface WebServerFace {
   register(input: {
     kind: 'prefix'
     path: string
-    handler: (request: Request) => Promise<Response> | Response
+    /**
+     * 真机实测：webserver 用 **Node 的 (req, res)** 调用它；type 上这里放宽成 unknown，
+     * 由 {@link dispatch} 适配（也可能是 Fetch 的 Request）。
+     */
+    handler: (request: Request, response?: unknown) => unknown
   }): () => void
 }
 
-/** 上下文里本插件需要读的字段（全部按需探测）。 */
+/** 客户端上下文里本插件要读的部分。 */
 interface PluginContext {
-  readonly webServer?: WebServerFace
   readonly logger?: { info?: (message: string) => void; warn?: (message: string) => void }
   effect?: (factory: () => unknown, label?: string) => void
+  /** 取可选服务。 */
+  get?: (name: string) => unknown
+  /** 注入后的子上下文才安全；未 inject 时直接读会抛错（真机实测过）。 */
+  readonly webServer?: WebServerFace
+  /** Cordis 的按需注入：注册路由的正确写法（官方 client-connection 同款）。 */
+  inject?: (names: string[], callback: (childCtx: never) => void) => void
 }
 
 /**
@@ -76,20 +87,16 @@ interface PluginContext {
  * @param ctx - host 上下文。
  * @param config - 解析后的插件配置。
  */
-export function apply(ctx: Context, config: Config): void {
+export function apply(ctx: Context, config?: Partial<Config>): void {
+  const settings = withDefaults(config)
   const scope = ctx as unknown as PluginContext
   const log = (message: string): void => scope.logger?.warn?.(`[${name}] ${message}`)
-  const store = new TreeStore<BranchTreeDocument>({ root: config.storageRoot })
+  const store = new TreeStore<BranchTreeDocument>({ root: settings.storageRoot })
   const service = new BranchService({ store, ctx, log })
 
-  scope.logger?.info?.(`[${name}] 存储根 ${config.storageRoot}；http=${config.http ? 'on' : 'off'}`)
+  scope.logger?.info?.(`[${name}] 存储根 ${settings.storageRoot}；http=${settings.http ? 'on' : 'off'}`)
 
-  if (!config.http) return
-
-  if (scope.webServer?.register === undefined) {
-    log('webServer 不可用，跳过 host 路由注册（功能降级）')
-    return
-  }
+  if (!settings.http) return
 
   const deps: RouteDeps = {
     service,
@@ -106,13 +113,123 @@ export function apply(ctx: Context, config: Config): void {
     },
   }
 
-  const dispose = scope.webServer.register({
-    kind: 'prefix',
-    path: BRANCH_ROUTE_PREFIX,
-    handler: (request) => handleBranchRoute(deps, request),
+  // 依赖注入：官方约定是**在 patch 行上声明 inject**（loader 读的是 `entry.options.inject`，
+  // 见 cordis-plugin-loader 的 `Inject.resolve(fiber.entry.options.inject, fiber.inject)`），
+  // **不是**模块导出的 `inject`。真机实测：不写在这里，`ctx.webServer` 会直接抛
+  // `cannot get property "webServer" without inject`，整条 fiber 挂掉。
+  // 注册时用 `ctx.inject([...], childCtx => …)`，与官方 client-connection 同款。
+  const register = (webCtx: {
+    webServer?: WebServerFace
+    get?: (name: string) => unknown
+    effect?: (factory: () => unknown, label?: string) => void
+  }): void => {
+    const webServer = webCtx.webServer ?? (webCtx.get?.('webServer') as WebServerFace | undefined)
+    if (webServer?.register === undefined) {
+      log('webServer 不可用，跳过 host 路由注册（功能降级）')
+      return
+    }
+    const dispose = webServer.register({
+      kind: 'prefix',
+      path: BRANCH_ROUTE_PREFIX,
+      // 关键：webserver 的 handler 签名是 **Node 的 (req, res)**（真机实测），
+      // 不是 Fetch 的 Request/Response；这里做一次适配再交给路由层。
+      handler: (request: Request, response?: unknown) => dispatch(deps, request, response),
+    })
+    ;(webCtx.effect ?? scope.effect)?.(() => dispose, `${name}: /${BRANCH_ROUTE_PREFIX} 路由`)
+  }
+
+  const injectInto = (scope as { inject?: (names: string[], callback: (childCtx: never) => void) => void })
+    .inject
+  if (typeof injectInto === 'function') {
+    injectInto.call(scope, ['webServer'], register as (childCtx: never) => void)
+    return
+  }
+  register(scope as never)
+}
+
+/**
+ * 把一次 webserver 请求交给路由层，并把结果写回。
+ *
+ * 兼容两种 carrier：
+ *   - Node 的 `(IncomingMessage, ServerResponse)`（真机实测的形态）；
+ *   - Fetch 的 `Request`（若将来的 carrier 换成 Web 标准）。
+ */
+async function dispatch(deps: RouteDeps, request: unknown, response: unknown): Promise<unknown> {
+  const isNodeRequest =
+    typeof response === 'object' &&
+    response !== null &&
+    typeof (response as { writeHead?: unknown }).writeHead === 'function'
+  if (!isNodeRequest) {
+    // Fetch carrier：直接返回 Response。
+    return handleBranchRoute(deps, request as Request)
+  }
+
+  const incoming = request as {
+    method?: string
+    url?: string
+    headers?: Record<string, string | string[] | undefined>
+    on?: (event: string, listener: (...args: never[]) => void) => void
+  }
+  const outgoing = response as {
+    writeHead: (status: number, headers?: Record<string, string>) => void
+    end: (body?: string) => void
+  }
+
+  const url = new URL(incoming.url ?? '/', 'http://127.0.0.1')
+  const body = await readNodeBody(incoming)
+  const fetchRequest = new Request(url, {
+    method: incoming.method ?? 'GET',
+    headers: normalizeHeaders(incoming.headers),
+    ...(body.length > 0 ? { body } : {}),
   })
 
-  scope.effect?.(() => dispose, `${name}: /${BRANCH_ROUTE_PREFIX} 路由`)
+  const result = await handleBranchRoute(deps, fetchRequest)
+  const headers: Record<string, string> = {}
+  result.headers.forEach((value, key) => {
+    headers[key] = value
+  })
+  outgoing.writeHead(result.status, headers)
+  outgoing.end(await result.text())
+  return undefined
+}
+
+/** 读 Node 请求体（无体或读失败时返回空串）。 */
+async function readNodeBody(incoming: {
+  on?: (event: string, listener: (...args: never[]) => void) => void
+}): Promise<string> {
+  const on = incoming.on
+  if (typeof on !== 'function') return ''
+  return new Promise<string>((resolve) => {
+    const chunks: string[] = []
+    on.call(incoming, 'data', ((chunk: { toString: (encoding: string) => string }) => {
+      chunks.push(chunk.toString('utf8'))
+    }) as never)
+    on.call(incoming, 'end', (() => resolve(chunks.join(''))) as never)
+    on.call(incoming, 'error', (() => resolve(chunks.join(''))) as never)
+  })
+}
+
+/** 把 Node 的 headers 规整成 Fetch 可接受的形状。 */
+function normalizeHeaders(
+  headers: Record<string, string | string[] | undefined> | undefined,
+): Record<string, string> {
+  const result: Record<string, string> = {}
+  for (const [key, value] of Object.entries(headers ?? {})) {
+    if (value === undefined) continue
+    result[key] = Array.isArray(value) ? value.join(', ') : value
+  }
+  return result
+}
+
+/** 把可能缺失的配置补全成完整配置（不依赖加载器是否跑过 schema）。 */
+export function withDefaults(config?: Partial<Config>): Config {
+  return {
+    storageRoot:
+      typeof config?.storageRoot === 'string' && config.storageRoot.trim() !== ''
+        ? config.storageRoot
+        : defaultStorageRoot(),
+    http: config?.http !== false,
+  }
 }
 
 /** DSH 用户目录下的插件专属存储根（不使用 process.cwd()）。 */
