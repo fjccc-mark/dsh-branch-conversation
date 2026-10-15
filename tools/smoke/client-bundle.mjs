@@ -3,7 +3,7 @@
  * 验证它确实是 DSH Web shell 认识的那套形状，并且真的能注册进座位。
  *
  * 覆盖：
- *   1. 产物调用 `window.__ModuleLoader__.load({ id, factory })`，id 与面板 id 一致；
+ *   1. 产物调用 `window.__ModuleLoader__.load({ id, factory })`，id 是**包名**（与 boot 图里的行 id 一致）；
  *   2. `require(...)` 只请求模块表里存在的平台模块（react / react/jsx-runtime / @deepseek-ai/*）；
  *   3. 导出形状正确：`apply` 是函数、`inject` 是字符串数组且含 `slots`；
  *   4. 用假的 ctx 调 `apply()`：`sidebar.panellist` 与 `main` 两个座位都被注册，id/key 一致；
@@ -102,10 +102,14 @@ function requireModule(name) {
   return moduleTable.get(name) ?? new Proxy({}, { get: () => () => undefined })
 }
 
-track('产物是 __ModuleLoader__.load({ id, factory }) 形状，id 与面板 id 一致', () => {
+track('产物是 __ModuleLoader__.load({ id, factory }) 形状，id 是**包名**（真机 loader 按包名查注册表）', () => {
   assert.ok(source.includes('__ModuleLoader__.load'), '产物没有加载器外壳')
   definition = evaluateBundle()
-  assert.equal(definition.id, 'branch-conversation', `id 不对：${definition.id}`)
+  // 真机实测（2026-10-15）：client-modules 的 register() 用 stripClientSuffix(registration.id)
+  // 当键（只去掉结尾的 "/client"），而 boot 图里这一行的 id 是**包名** dsh-branch-conversation。
+  // 这里若注册成面板 id（branch-conversation），loader 会报
+  //   client-modules: could not load "dsh-branch-conversation": … loaded without registering …
+  assert.equal(definition.id, 'dsh-branch-conversation', `id 必须是包名，实际：${definition.id}`)
   assert.equal(typeof definition.factory, 'function', 'factory 不是函数')
 })
 

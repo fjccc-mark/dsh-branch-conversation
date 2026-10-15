@@ -62,7 +62,7 @@
     "typecheck:host": "tsc -b tsconfig.host.json --pretty false",
     "typecheck:client": "tsc -b tsconfig.client.json --pretty false",
     "typecheck": "npm run typecheck:host && npm run typecheck:client",
-    "build": "tsdown && node tools/build/wrap-client-bundle.mjs lib/client.js branch-conversation",
+    "build": "tsdown && node tools/build/wrap-client-bundle.mjs lib/client.js dsh-branch-conversation",
     "smoke": "node tools/smoke/branch-smoke.mjs && node tools/smoke/branch-m1-cases.mjs && node tools/smoke/branch-m4-cases.mjs && node tools/smoke/client-bundle.mjs && node tools/smoke/tree-layout.mjs && node tools/smoke/export.mjs",
     "preview": "start tools/preview/panel-preview.html"
   },

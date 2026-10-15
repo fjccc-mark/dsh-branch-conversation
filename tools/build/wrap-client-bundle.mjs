@@ -4,7 +4,7 @@
  * 目标形状（照官方插件产物取证）：
  * ```js
  * window.__ModuleLoader__.load({
- *   id: "branch-conversation",
+ *   id: "dsh-branch-conversation",   // ← 必须是**包名**，不是面板 id
  *   factory: (require) => {
  *     var module = { exports: {} };
  *     var exports = module.exports;
@@ -15,8 +15,14 @@
  * });
  * ```
  *
+ * **id 必须是包名**（真机实测 2026-10-15）：client-modules 的 `register()` 用
+ * `stripClientSuffix(registration.id)` 当注册表的键（只去掉结尾的 `/client`），
+ * 而 boot 图里那一行的 id 由**包名**生成；注册成面板 id 会让 loader 查不到，
+ * 报 `could not load "dsh-branch-conversation": … loaded without registering …`。
+ * 官方插件的产物同样是包名（如 `id: "dshmarket"`、`id: "@deepseek-ai/dsh-client-ui-sidebar"`）。
+ *
  * 幂等：已经包装过的产物不会被二次包装。
- * 用法：node tools/build/wrap-client-bundle.mjs [产物路径] [插件 id]
+ * 用法：node tools/build/wrap-client-bundle.mjs [产物路径] [包名]
  * @module dsh-branch-conversation/tools/wrap-client-bundle
  */
 
@@ -27,8 +33,8 @@ import { dirname, resolve } from 'node:path'
 const here = dirname(fileURLToPath(import.meta.url))
 const root = resolve(here, '..', '..')
 
-const bundlePath = resolve(root, process.argv[2] ?? 'lib/client/index.js')
-const pluginId = process.argv[3] ?? 'branch-conversation'
+const bundlePath = resolve(root, process.argv[2] ?? 'lib/client.js')
+const pluginId = process.argv[3] ?? 'dsh-branch-conversation'
 
 const original = readFileSync(bundlePath, 'utf8')
 
