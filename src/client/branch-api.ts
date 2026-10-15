@@ -84,4 +84,15 @@ export const branchApi = {
   splitOrphans(treeId?: string): Promise<BranchApiResult<{ changed: readonly string[] }>> {
     return post('branch/split-orphans', treeId === undefined ? {} : { treeId })
   },
+  /** 切换节点的折叠状态（叶子可折叠，状态持久化在树文档里）。 */
+  setCollapsed(
+    nodeId: string,
+    collapsed?: boolean,
+  ): Promise<BranchApiResult<{ treeId: string; nodeId: string; collapsed: boolean }>> {
+    return post('branch/set-collapsed', collapsed === undefined ? { nodeId } : { nodeId, collapsed })
+  },
+  /** 用系统默认程序打开文件节点。 */
+  openFile(nodeId: string): Promise<BranchApiResult<{ path: string }>> {
+    return post('branch/open-file', { nodeId })
+  },
 }

@@ -22,6 +22,9 @@ export interface SessionModel {
     list: (request: unknown, signal: AbortSignal) => Promise<unknown>
     inspect: (sessionId: string, signal?: AbortSignal) => Promise<unknown>
     prompt?: (request: unknown, signal: AbortSignal) => Promise<unknown>
+    /** 这个部署能否把工作区路径交给宿主桌面（文件节点的"用系统默认程序打开"）。 */
+    canOpenWorkspacePath?: () => boolean
+    openWorkspacePath?: (request: { path: string }, signal: AbortSignal) => Promise<unknown>
   }
   /** `ctx.sessions`：SessionStore 面，用来建"无 seed + 有血缘"的子会话。 */
   readonly store: {
@@ -52,6 +55,12 @@ export function sessionModelOf(ctx: unknown): SessionModel | null {
       inspect: controller.inspect as SessionModel['controller']['inspect'],
       ...(typeof controller.prompt === 'function'
         ? { prompt: controller.prompt as NonNullable<SessionModel['controller']['prompt']> }
+        : {}),
+      ...(typeof controller.canOpenWorkspacePath === 'function'
+        ? { canOpenWorkspacePath: controller.canOpenWorkspacePath }
+        : {}),
+      ...(typeof controller.openWorkspacePath === 'function'
+        ? { openWorkspacePath: controller.openWorkspacePath }
         : {}),
     },
     store: { create: store.create as SessionModel['store']['create'] },

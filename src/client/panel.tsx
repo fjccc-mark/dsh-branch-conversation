@@ -1,20 +1,20 @@
 /**
- * 「分支对话」面板：侧边栏行图标 + 中央列页面。
+ * 「分支对话」面板：侧边栏行图标 + 中央列页面（竖向流程图）。
  *
- * 进度：M0 的面板骨架 + M1 的「在此节点提新问题」开发入口（建子会话闭环）。
- * 流程图渲染在 M2/M3 接上（见 docs/分支对话插件·设计文档.md §3）。
+ * 交互（M2）：
+ *   - 点击节点标题 → 切换到该会话（官方 `uiWorkspace.openSession`，由入口注入）；
+ *   - 节点上的「＋」→ 在该节点上提新问题（建子会话）；
+ *   - 文件节点 → 用系统默认程序打开（裁决 §3.4 路线 ①）；
+ *   - 「▾/▸」→ 折叠/展开子树（状态持久化在树文档里）。
  * @module dsh-branch-conversation/client/panel
  */
 
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import type { ReactElement, ReactNode } from 'react'
 import { branchApi, type BranchCreateValue, type BranchTreeView } from './branch-api.ts'
 import { useCapabilityReport } from './capability.ts'
-
-/** 页面入参：主视图当前会话 id（由客户端入口按会话目录快照传入，可为空）。 */
-export interface BranchPanelProps {
-  readonly sessionId?: string | null
-}
+import { openSessionById } from './navigation.ts'
+import { isSessionNode, layoutTree, type TreeRow } from './tree-layout.ts'
 
 /** 页面使用的全局语义类名（与 panel.css 一一对应，不经过哈希）。 */
 const cls = {
@@ -27,20 +27,32 @@ const cls = {
   hint: 'dsh-branch-hint',
   muted: 'dsh-branch-muted',
   warn: 'dsh-branch-warn',
-  placeholder: 'dsh-branch-placeholder',
+  ok: 'dsh-branch-ok',
+  toolbar: 'dsh-branch-toolbar',
+  button: 'dsh-branch-button',
+  buttonTiny: 'dsh-branch-button-tiny',
   form: 'dsh-branch-form',
   field: 'dsh-branch-field',
   label: 'dsh-branch-label',
   input: 'dsh-branch-input',
   textarea: 'dsh-branch-textarea',
   actions: 'dsh-branch-actions',
-  button: 'dsh-branch-button',
-  ok: 'dsh-branch-ok',
-  node: 'dsh-branch-node',
-  nodeChildren: 'dsh-branch-node-children',
-  nodeCurrent: 'dsh-branch-node-current',
-  nodeOrphan: 'dsh-branch-node-orphan',
+  tree: 'dsh-branch-tree',
+  treeRow: 'dsh-branch-tree-row',
+  treeRails: 'dsh-branch-tree-rails',
+  treeLabel: 'dsh-branch-tree-label',
+  treeCurrent: 'dsh-branch-tree-current',
+  treeOrphan: 'dsh-branch-tree-orphan',
+  treeMissing: 'dsh-branch-tree-missing',
+  treeBadge: 'dsh-branch-tree-badge',
+  treeActions: 'dsh-branch-tree-actions',
+  empty: 'dsh-branch-empty',
 } as const
+
+/** 页面入参：主视图当前会话 id（由客户端入口按会话目录快照传入，可为空）。 */
+export interface BranchPanelProps {
+  readonly sessionId?: string | null
+}
 
 /** 侧边栏行图标：官方 shell 给尺寸与选中态，本组件只画图形。 */
 export function BranchPanelIcon({ size }: { size: number; active: boolean }): ReactElement {
@@ -69,23 +81,73 @@ export function BranchPanelIcon({ size }: { size: number; active: boolean }): Re
   )
 }
 
-/** 中央列页面：分支树的流程图容器。 */
+/** 中央列页面：分支树的竖向流程图。 */
 export function BranchPanelPage({ sessionId = null }: BranchPanelProps = {}): ReactNode {
   const { report, error, pending } = useCapabilityReport()
   const [tree, setTree] = useState<BranchTreeView | null>(null)
   const [status, setStatus] = useState<string | null>(null)
-  const [lastBranch, setLastBranch] = useState<BranchCreateValue | null>(null)
+  const [failure, setFailure] = useState<string | null>(null)
+  const [branchFrom, setBranchFrom] = useState<TreeRow | null>(null)
 
-  const refreshTree = useCallback(async (target: string) => {
-    const result = await branchApi.view(target)
+  const refresh = useCallback(async (target: string | null) => {
+    if (target === null) {
+      setTree(null)
+      return
+    }
+    // adopt：读树的同时把该会话还没进树的轮次补成节点（幂等）。
+    const result = await branchApi.adopt(target)
     if (result.ok) {
       setTree(result.value)
+      setFailure(null)
       setStatus(null)
       return
     }
     setTree(null)
-    setStatus(`这个会话还没有分支树：${result.error.message}`)
+    setStatus(`这个会话还没有分支树（${result.error.code}）：${result.error.message}`)
   }, [])
+
+  // 主视图会话变化时自动读取它的树。
+  useEffect(() => {
+    void refresh(sessionId)
+  }, [sessionId, refresh])
+
+  const layout = layoutTree(tree)
+
+  const onOpenFile = useCallback(async (row: TreeRow) => {
+    const result = await branchApi.openFile(row.id)
+    setFailure(result.ok ? null : `${result.error.code}：${result.error.message}`)
+  }, [])
+
+  const onToggle = useCallback(
+    async (row: TreeRow) => {
+      const result = await branchApi.setCollapsed(row.id, !row.collapsed)
+      if (!result.ok) {
+        setFailure(`${result.error.code}：${result.error.message}`)
+        return
+      }
+      await refresh(sessionId)
+    },
+    [refresh, sessionId],
+  )
+
+  const onOpenSession = useCallback((target: string) => {
+    if (!openSessionById(target)) {
+      setFailure('这个部署没有可用的会话切换入口（uiWorkspace.openSession）')
+    }
+  }, [])
+
+  const created = useCallback(
+    async (value: BranchCreateValue) => {
+      setBranchFrom(null)
+      setStatus(
+        value.promptDelivered
+          ? `已建子会话 ${value.sessionId}，首句提问已排进它的待办队列。`
+          : `已建子会话 ${value.sessionId}${value.promptError !== undefined ? `（首句未投递：${value.promptError}）` : ''}。`,
+      )
+      await refresh(value.sessionId)
+    },
+    [refresh],
+  )
 
   return (
     <div className={cls.page} data-dsh-branch-view="" data-dsh-plugin="branch-conversation">
@@ -96,16 +158,73 @@ export function BranchPanelPage({ sessionId = null }: BranchPanelProps = {}): Re
         </p>
       </header>
 
+      <div className={cls.toolbar}>
+        <button
+          type="button"
+          className={cls.button}
+          disabled={sessionId === null}
+          onClick={() => {
+            void refresh(sessionId)
+          }}
+        >
+          刷新
+        </button>
+        <span className={cls.muted}>
+          {sessionId === null ? '未找到主视图会话' : `当前会话 ${sessionId}`}
+        </span>
+      </div>
+
+      {error !== null ? (
+        <p className={cls.warn}>
+          无法读取 host 诊断：{error}
+          <br />
+          （说明 host 半未加载或路由未注册；面板其余部分仍可用。）
+        </p>
+      ) : null}
+      {failure !== null ? <p className={cls.warn}>{failure}</p> : null}
+      {status !== null ? <p className={cls.muted}>{status}</p> : null}
+
+      <section aria-label="分支树">
+        <h3 className={cls.sectionTitle}>
+          流程图
+          {tree !== null ? <span className={cls.hint}>（树 {tree.treeId}）</span> : null}
+          {layout.hiddenTotal > 0 ? (
+            <span className={cls.hint}>（已折叠 {layout.hiddenTotal} 个节点）</span>
+          ) : null}
+        </h3>
+        {layout.rows.length === 0 ? (
+          <p className={cls.empty}>
+            还没有树：在会话里正常问答后点「刷新」，即可把轮次接成轴线。
+          </p>
+        ) : (
+          <ul className={cls.tree}>
+            {layout.rows.map((row) => (
+              <TreeLine
+                key={row.id}
+                row={row}
+                onOpenSession={onOpenSession}
+                onOpenFile={onOpenFile}
+                onToggle={onToggle}
+                onBranch={setBranchFrom}
+              />
+            ))}
+          </ul>
+        )}
+      </section>
+
+      {branchFrom !== null ? (
+        <BranchCreateForm
+          parentLabel={branchFrom.label}
+          parentSessionId={branchFrom.sessionId}
+          defaultTurn={branchFrom.turn ?? 1}
+          onCancel={() => setBranchFrom(null)}
+          onCreated={created}
+        />
+      ) : null}
+
       <section aria-label="运行环境自检">
         <h3 className={cls.sectionTitle}>运行环境自检</h3>
         {pending ? <p className={cls.muted}>正在读取 host 诊断…</p> : null}
-        {error !== null ? (
-          <p className={cls.warn}>
-            无法读取 host 诊断：{error}
-            <br />
-            （不影响使用；说明 host 半未加载或路由未注册。）
-          </p>
-        ) : null}
         {report !== null ? (
           <ul className={cls.list}>
             <li>
@@ -130,62 +249,100 @@ export function BranchPanelPage({ sessionId = null }: BranchPanelProps = {}): Re
           </ul>
         ) : null}
       </section>
-
-      <section aria-label="建分支">
-        <h3 className={cls.sectionTitle}>在此节点提新问题（M1 开发入口）</h3>
-        <BranchCreateForm
-          defaultSessionId={sessionId ?? ''}
-          onCreated={async (value) => {
-            setLastBranch(value)
-            setStatus(
-              value.promptDelivered
-                ? '已建子会话，并把首句提问排进它的待办队列。'
-                : `已建子会话${value.promptError !== undefined ? `（首句未投递：${value.promptError}）` : ''}。`,
-            )
-            await refreshTree(value.sessionId)
-          }}
-        />
-        {status !== null ? <p className={cls.muted}>{status}</p> : null}
-        {lastBranch !== null ? (
-          <p className={cls.ok}>
-            新会话 <code>{lastBranch.sessionId}</code> 已挂到树 <code>{lastBranch.treeId}</code> 的节点{' '}
-            <code>{lastBranch.nodeId}</code> 下。
-          </p>
-        ) : null}
-      </section>
-
-      <section aria-label="分支树">
-        <h3 className={cls.sectionTitle}>当前会话的分支树</h3>
-        {sessionId === null ? (
-          <p className={cls.muted}>还没有打开任何会话。</p>
-        ) : tree === null ? (
-          <button
-            type="button"
-            className={cls.button}
-            onClick={() => {
-              void refreshTree(sessionId)
-            }}
-          >
-            读取分支树
-          </button>
-        ) : (
-          <BranchTreeNodes view={tree} />
-        )}
-      </section>
     </div>
   )
 }
 
-/** 建分支的表单（M1 用于验证闭环；M2 会换成节点上的按钮与弹层）。 */
+/** 流程图的一行。 */
+function TreeLine({
+  row,
+  onOpenSession,
+  onOpenFile,
+  onToggle,
+  onBranch,
+}: {
+  row: TreeRow
+  onOpenSession: (sessionId: string) => void
+  onOpenFile: (row: TreeRow) => void
+  onToggle: (row: TreeRow) => void
+  onBranch: (row: TreeRow) => void
+}): ReactNode {
+  const labelClass = row.orphan
+    ? cls.treeOrphan
+    : row.fileMissing
+      ? cls.treeMissing
+      : row.current
+        ? cls.treeCurrent
+        : cls.treeLabel
+
+  const activate = (): void => {
+    if (row.kind === 'file') onOpenFile(row)
+    else if (isSessionNode(row)) onOpenSession(row.sessionId)
+  }
+
+  return (
+    <li className={cls.treeRow} data-dsh-branch-node={row.id}>
+      <span className={cls.treeRails} aria-hidden="true">
+        {row.rails.join('')}
+      </span>
+      <button
+        type="button"
+        className={cls.buttonTiny}
+        aria-expanded={!row.collapsed}
+        title={row.collapsed ? '展开子节点' : '折叠子节点'}
+        onClick={() => onToggle(row)}
+      >
+        {row.collapsed ? '▸' : '▾'}
+      </button>
+      <button
+        type="button"
+        className={labelClass}
+        disabled={row.orphan || (row.kind === 'qa' && !isSessionNode(row))}
+        title={
+          row.orphan
+            ? '原会话已被删除'
+            : row.kind === 'file'
+              ? `用系统默认程序打开：${row.filePath ?? ''}`
+              : `切换到会话 ${row.sessionId}`
+        }
+        onClick={activate}
+      >
+        {row.kind === 'file' ? '📄' : '💬'} {row.label}
+      </button>
+      {row.turn !== null ? <span className={cls.treeBadge}>第 {row.turn} 轮</span> : null}
+      {row.orphan ? <span className={cls.treeBadge}>原会话已删除</span> : null}
+      {row.fileMissing ? <span className={cls.treeBadge}>文件不存在</span> : null}
+      <span className={cls.treeActions}>
+        {row.kind === 'qa' && !row.orphan && row.turn !== null ? (
+          <button
+            type="button"
+            className={cls.buttonTiny}
+            title="在这个节点上提新问题（建子会话）"
+            onClick={() => onBranch(row)}
+          >
+            ＋
+          </button>
+        ) : null}
+      </span>
+    </li>
+  )
+}
+
+/** 建分支的表单（由节点上的「＋」唤起）。 */
 function BranchCreateForm({
-  defaultSessionId,
+  parentLabel,
+  parentSessionId,
+  defaultTurn,
+  onCancel,
   onCreated,
 }: {
-  defaultSessionId: string
+  parentLabel: string
+  parentSessionId: string
+  defaultTurn: number
+  onCancel: () => void
   onCreated: (value: BranchCreateValue) => Promise<void> | void
 }): ReactNode {
-  const [parentSessionId, setParentSessionId] = useState(defaultSessionId)
-  const [parentTurn, setParentTurn] = useState('1')
+  const [parentTurn, setParentTurn] = useState(String(defaultTurn))
   const [prompt, setPrompt] = useState('')
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<string | null>(null)
@@ -194,7 +351,7 @@ function BranchCreateForm({
     setBusy(true)
     setFailure(null)
     const result = await branchApi.create({
-      parentSessionId: parentSessionId.trim(),
+      parentSessionId,
       parentTurn: Number.parseInt(parentTurn, 10),
       ...(prompt.trim() === '' ? {} : { prompt: prompt.trim() }),
     })
@@ -209,16 +366,10 @@ function BranchCreateForm({
 
   return (
     <div className={cls.form}>
-      <label className={cls.field}>
-        <span className={cls.label}>父会话 id</span>
-        <input
-          className={cls.input}
-          value={parentSessionId}
-          onChange={(event) => setParentSessionId(event.target.value)}
-          placeholder="当前主视图会话的 id"
-          spellCheck={false}
-        />
-      </label>
+      <h3 className={cls.sectionTitle}>在「{parentLabel}」上提新问题</h3>
+      <p className={cls.muted}>
+        父会话 <code>{parentSessionId}</code>（子会话不继承上下文，只继承模型人设与权限）
+      </p>
       <label className={cls.field}>
         <span className={cls.label}>父节点轮次（第几次问答，从 1 开始）</span>
         <input
@@ -242,54 +393,19 @@ function BranchCreateForm({
         <button
           type="button"
           className={cls.button}
-          disabled={busy || parentSessionId.trim() === ''}
+          disabled={busy}
           onClick={() => {
             void submit()
           }}
         >
-          {busy ? '正在建子会话…' : '在此节点提新问题'}
+          {busy ? '正在建子会话…' : '建子会话'}
+        </button>
+        <button type="button" className={cls.button} disabled={busy} onClick={onCancel}>
+          取消
         </button>
       </div>
       {failure !== null ? <p className={cls.warn}>{failure}</p> : null}
     </div>
-  )
-}
-
-/** 树的缩进渲染（M2 换成流程图）。 */
-function BranchTreeNodes({ view }: { view: BranchTreeView }): ReactNode {
-  const byId = new Map(view.document.nodes.map((node) => [node.id, node]))
-  const rendered = new Set<string>()
-
-  const renderNode = (nodeId: string, depth: number): ReactNode => {
-    const node = byId.get(nodeId)
-    if (node === undefined || rendered.has(node.id)) return null
-    rendered.add(node.id)
-    return (
-      <li key={node.id} className={node.orphan ? cls.nodeOrphan : undefined}>
-        <span className={node.id === view.currentNodeId ? cls.nodeCurrent : cls.node}>
-          {node.kind === 'file' ? '📄' : '💬'} {node.label}
-          {node.turn !== null ? <span className={cls.hint}>第 {node.turn} 轮</span> : null}
-          {node.orphan ? <span className={cls.hint}>（原会话已删除）</span> : null}
-        </span>
-        {node.children.length > 0 ? (
-          <ul className={cls.nodeChildren}>
-            {node.children.map((childId) => renderNode(childId, depth + 1))}
-          </ul>
-        ) : null}
-      </li>
-    )
-  }
-
-  const roots = view.document.nodes.filter(
-    (node) => !view.document.nodes.some((other) => other.children.includes(node.id)),
-  )
-
-  return (
-    <ul className={cls.nodeChildren}>
-      {roots.length === 0
-        ? view.document.nodes.map((node) => renderNode(node.id, 0))
-        : roots.map((node) => renderNode(node.id, 0))}
-    </ul>
   )
 }
 

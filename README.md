@@ -31,12 +31,20 @@ DeepSeek Harness（DSH）插件：在官方侧边栏中新增一个**「分支�
 - 存储布局定稿：树文档 `<storageRoot>/<treeId>.json` + 会话索引 `<storageRoot>/_index.json`（索引只是加速）。
 - 冒烟 **14/14 通过**（`node tools/smoke/branch-m1-cases.mjs`）。
 
-**未完成**（见设计文档 §6.5 / §6.6）
+**M2 完成**
 
-- 浏览器半尚未包装成官方 `window.__ModuleLoader__.load({ id, factory })` 形状，因此面板还不能在真机 DSH 里渲染。
-- 页面上的"当前会话"来源待接正式接缝（官方 hooks 面需要 shell 注入的 runtime props），目前退化为手动粘贴会话 id。
-- 流程图 UI、文件节点、三种导出（JSON / Markdown / Mermaid）。
-- 真机回读一次 `parentSessionId`（已在假会话面按官方契约覆盖）。
+- **浏览器半的加载协议打通**：产物改成官方形状 `window.__ModuleLoader__.load({ id, factory })`——
+  构建双配置（host ESM + client CJS）、平台模块（`react` / `@deepseek-ai/*`）全部外部化交给 shell 模块表、
+  构建后由 `tools/build/wrap-client-bundle.mjs` 套外壳。产物冒烟 **7/7**（含"没有请求模块表之外的模块"）。
+- **竖向流程图**：`layoutTree` 纯函数给出深度与轨道前缀（`│ ├─ └─`）、折叠隐藏计数、文件节点与孤儿标记、多根各自从 0 起。
+- **节点交互**：点击节点切换会话（官方 `uiWorkspace.openSession`）；节点上「＋」就地建子会话；
+  「▾/▸」折叠（新增 `/branch/set-collapsed`，状态持久化）；文件节点点击走 `/branch/open-file` → 系统默认程序。
+- 布局冒烟 **8/8**（真实加载客户端产物）。
+
+**未完成**（见设计文档 §6.7.3）
+
+- **真机渲染仍待验证**：需要一个装了本插件的 profile 实例（本机 `web` profile 未装，且 `dsh web` 有启动令牌 + 签名 cookie 的鉴权栅栏）。
+- 三种导出（JSON / Markdown / Mermaid）、孤儿升根的 UI 入口、窄屏与键盘可达性的人工核对。
 
 ## 目标平台
 
@@ -71,9 +79,8 @@ dsh --profile branch-dev
 ```sh
 npm install --legacy-peer-deps         # 官方 SDK 的 peer 声明在 npm 下需要这个开关
 npm run typecheck                      # host + client 两个 program
-npm run build                          # 产出 lib/index.js、lib/invariant.js、lib/client/index.js
-node tools/smoke/branch-smoke.mjs      # M0：存储与路由契约（12 项，无需真机 DSH）
-node tools/smoke/branch-m1-cases.mjs   # M1：建子会话 / 节点派生 / 孤儿升根（14 项）
+npm run build                          # tsdown（host ESM + client CJS）并给 client 套上加载器外壳
+npm run smoke                          # 四套冒烟：M0 12 项 + M1 14 项 + 产物 7 项 + 布局 8 项
 npm run preview                        # 浏览器打开面板静态预览，人工核对排版
 ```
 
@@ -88,23 +95,28 @@ npm run preview                        # 浏览器打开面板静态预览，人
 src/
   core/types.ts            共享类型：树文档、节点、文件引用、会话事实、路由信封
   host/tree-store.ts       文档存储：每棵树一把锁 + 原子写 + 只读降级（树与索引共用）
-  host/session-model.ts    只读 DSH 会话：能力探测、inspect 折轮次、快照、建子会话、投递首句
-  host/branch-service.ts   分支服务：建分支 / 补节点 / 读树 / 孤儿升根 / 诊断
+  host/session-model.ts    只读 DSH 会话：能力探测、inspect 折轮次、快照、建子会话、投递首句、开文件
+  host/branch-service.ts   分支服务：建分支 / 补节点 / 读树 / 折叠 / 孤儿升根 / 开文件 / 诊断
   host/routes.ts           /branch/* 路由与错误码（400/404/409/501/500）
   index.ts                 host 半：配置、装配、注册前缀路由
   invariant.ts             组合自检用的稳定符号
   testing/fake-sessions.ts 按官方契约造假的会话面（供冒烟测试驱动真代码路径）
   client/
-    index.ts               浏览器半：注册 sidebar.panellist 行 + main 页面
-    panel.tsx              行图标、中央列页面、建分支表单、树的缩进渲染
+    index.ts               浏览器半入口：注册 sidebar.panellist 行 + main 页面，注入会话目录与导航面
+    panel.tsx              行图标、中央列页面（竖向流程图）、节点交互、建分支表单
+    tree-layout.ts         流程图布局纯函数（深度 / 轨道 / 折叠 / 标记）
+    navigation.ts          会话切换面（uiWorkspace.openSession 的模块级持有）
     branch-api.ts          host 路由客户端（文档相对路径，永不抛出）
     capability.ts          拉取 host 诊断
-    use-main-session.ts    从会话目录快照取主视图会话（读不到就退化为手动输入）
+    use-main-session.ts    从会话目录快照取主视图会话（读不到就退化）
     panel.css              页面样式（全局语义类名 .dsh-branch-*）
 tools/
-  smoke/branch-smoke.mjs     M0 冒烟
-  smoke/branch-m1-cases.mjs  M1 冒烟
-  preview/panel-preview.html 面板静态预览（人工核对排版）
+  build/wrap-client-bundle.mjs  给 client 产物套 __ModuleLoader__ 外壳
+  smoke/branch-smoke.mjs        M0：存储与路由契约
+  smoke/branch-m1-cases.mjs     M1：建子会话 / 节点派生 / 孤儿升根
+  smoke/client-bundle.mjs       M2：产物形状与座位注册
+  smoke/tree-layout.mjs         M2：流程图布局
+  preview/panel-preview.html    面板静态预览（人工核对排版）
 ```
 
 ### 关键设计决定（都有取证依据）

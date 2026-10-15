@@ -419,6 +419,75 @@ export class BranchService {
     return { changed }
   }
 
+  /**
+   * 切换某个节点的折叠状态（叶子可折叠，状态持久化在树文档里）。
+   *
+   * 只改这一个字段，其余部分原样保留；节点不存在时返回 null（路由转 404）。
+   * @param nodeId - 目标节点。
+   * @param collapsed - 目标状态；省略表示取反。
+   */
+  async setCollapsed(
+    nodeId: string,
+    collapsed: boolean | undefined,
+  ): Promise<{ readonly treeId: string; readonly nodeId: string; readonly collapsed: boolean } | null> {
+    const located = await this.locateNode(nodeId)
+    if (located === null) return null
+    const { treeId, node } = located
+    const next = collapsed ?? !node.collapsed
+    const write = await this.store.update(treeId, (current) => {
+      if (current === null) return null
+      return {
+        ...current,
+        nodes: current.nodes.map((row) => (row.id === nodeId ? { ...row, collapsed: next } : row)),
+      }
+    })
+    if (!write.ok) throw writeFailure(write.error)
+    return { treeId, nodeId, collapsed: next }
+  }
+
+  /**
+   * 用系统默认程序打开一个文件节点（裁决 §3.4 路线 ①）。
+   *
+   * 走官方 `openWorkspacePath`：插件只传路径，不读文件内容、不做应用内预览。
+   * @param nodeId - 文件节点 id（用节点而不是裸路径，避免被当成任意路径打开器）。
+   * @param signal - 取消信号。
+   */
+  async openFileNode(nodeId: string, signal: AbortSignal): Promise<{ readonly path: string }> {
+    const located = await this.locateNode(nodeId)
+    if (located === null) throw new BranchFailure('not-found', `节点 ${nodeId} 不存在`)
+    const path = located.node.file?.path
+    if (typeof path !== 'string' || path === '') {
+      throw new BranchFailure('invalid-request', `节点 ${nodeId} 不是文件节点`)
+    }
+    const controller = this.model().controller
+    if (typeof controller.canOpenWorkspacePath === 'function' && !controller.canOpenWorkspacePath()) {
+      throw new BranchFailure('unsupported', '此部署无法把路径交给系统默认程序打开')
+    }
+    if (typeof controller.openWorkspacePath !== 'function') {
+      throw new BranchFailure('unsupported', '此部署的会话控制面不提供 openWorkspacePath')
+    }
+    try {
+      await controller.openWorkspacePath({ path }, signal)
+    } catch (error) {
+      throw new BranchFailure('io', `打开失败：${error instanceof Error ? error.message : String(error)}`)
+    }
+    return { path }
+  }
+
+  /** 跨树定位一个节点（节点 id 在每棵树内唯一）。 */
+  private async locateNode(
+    nodeId: string,
+  ): Promise<{ readonly treeId: string; readonly node: BranchNode } | null> {
+    for (const treeId of await this.store.listTreeIds()) {
+      if (treeId === TREE_INDEX_ID) continue
+      const document = await this.readTree(treeId)
+      if (document === null) continue
+      const node = document.nodes.find((row) => row.id === nodeId)
+      if (node !== undefined) return { treeId, node }
+    }
+    return null
+  }
+
   /** 诊断用的小结（不加载全部树）。 */
   async summary(): Promise<{
     readonly storageRoot: string

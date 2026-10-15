@@ -1,12 +1,12 @@
 /**
- * 取"主视图当前显示的会话"（尽力而为）。
+ * 取"主视图当前显示的会话"。
  *
  * 客户端会话模型（0.1.2 世代）**没有全局的 current 选中项**：视图选择属于工作区 UI，
  * 它通过会话目录的按来源持有计数（`retainedBy.mainView`）发布当前主区会话。
+ * 因此这里读快照里的这个标记（照同类插件的做法），而不是去猜别的东西。
  *
- * 因此这里从一个可注入的会话目录面读取该标记。M0 阶段尚未确认"能从任意插件位置
- * 拿到会话目录"的正式接缝（官方 hooks 面需要 shell 注入的 runtime props，M2 接页面时一并确认），
- * 所以本 hook 在拿不到目录时**返回 null**，页面退化为让用户手动粘贴会话 id——不猜、不崩。
+ * 用法：入口 `apply(ctx)` 里调一次 {@link installSessionsFace} 把 `ctx.get('sessions')` 装进来，
+ * 页面组件再用 {@link useMainViewSessionId} 订阅。拿不到目录时返回 null，页面退化为手动输入。
  * @module dsh-branch-conversation/client/use-main-session
  */
 
@@ -31,6 +31,30 @@ export interface SessionsFace {
   }
 }
 
+/** 会话目录 + 导航面。 */
+export interface ClientSessions {
+  /** 目录快照（用于定位主视图会话）。 */
+  readonly list?: SessionsFace['list']
+  /** 会话的 cwd（展示与校验用）。 */
+  readonly cwd?: (sessionId: string) => string | undefined
+}
+
+/** 模块级持有：入口安装一次，页面组件读取。 */
+let installed: ClientSessions | undefined
+
+/**
+ * 安装会话目录面（由客户端入口调用）。
+ * @param sessions - 从客户端上下文取到的会话面；取不到时传 undefined。
+ */
+export function installSessionsFace(sessions: ClientSessions | undefined): void {
+  installed = sessions
+}
+
+/** 读当前安装的会话面（诊断用）。 */
+export function sessionsFace(): ClientSessions | undefined {
+  return installed
+}
+
 /**
  * 从目录快照里解析出主视图会话 id。
  *
@@ -50,14 +74,13 @@ export function mainViewSessionIdOf(snapshot: SessionListSnapshot | undefined): 
 }
 
 /**
- * 监听会话目录，返回主视图当前会话 id；拿不到目录或没有会话时为 null。
- * @param sessions - 会话目录面（由调用方注入；缺省则不订阅）。
+ * 订阅会话目录，返回主视图当前会话 id；拿不到目录或没有会话时为 null。
  * @returns 主视图会话 id 或 null。
  */
-export function useMainViewSessionId(sessions?: SessionsFace): string | null {
+export function useMainViewSessionId(): string | null {
   const [sessionId, setSessionId] = useState<string | null>(null)
   useEffect(() => {
-    const list = sessions?.list
+    const list = installed?.list
     if (list?.getSnapshot === undefined) {
       setSessionId(null)
       return
@@ -67,6 +90,6 @@ export function useMainViewSessionId(sessions?: SessionsFace): string | null {
     }
     update()
     return list.subscribe?.(update)
-  }, [sessions])
+  }, [])
   return sessionId
 }

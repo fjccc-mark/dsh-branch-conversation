@@ -68,6 +68,21 @@ export async function handleBranchRoute(deps: RouteDeps, request: Request): Prom
         return json({ ok: true, value: await deps.service.viewOfSession(sessionId) })
       }
 
+      case 'POST set-collapsed': {
+        const body = await readJson(request)
+        const nodeId = stringField(body, 'nodeId')
+        const collapsed = optionalBooleanField(body, 'collapsed')
+        const value = await deps.service.setCollapsed(nodeId, collapsed)
+        if (value === null) return fail({ code: 'not-found', message: `节点 ${nodeId} 不存在` }, 404)
+        return json({ ok: true, value })
+      }
+
+      case 'POST open-file': {
+        const body = await readJson(request)
+        const nodeId = stringField(body, 'nodeId')
+        return json({ ok: true, value: await deps.service.openFileNode(nodeId, signal) })
+      }
+
       case 'POST split-orphans': {
         const body = await readJson(request)
         const treeId = optionalStringField(body, 'treeId')
@@ -139,9 +154,16 @@ function optionalStringField(body: Record<string, unknown>, key: string): string
   return value
 }
 
-/** 必填整数字段。 */
-function numberField(body: Record<string, unknown>, key: string): number {
+/** 可选布尔字段。 */
+function optionalBooleanField(body: Record<string, unknown>, key: string): boolean | undefined {
   const value = body[key]
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'boolean') throw new RequestBodyError(`字段 ${key} 应为布尔值`)
+  return value
+}
+
+/** 必填整数字段。 */
+function numberField(body: Record<string, unknown>, key: string): number {  const value = body[key]
   if (typeof value !== 'number' || !Number.isInteger(value)) {
     throw new RequestBodyError(`缺少字段 ${key}（应为整数）`)
   }
