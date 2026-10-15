@@ -72,22 +72,75 @@ interface ClientScope {
 
 /**
  * 浏览器半入口：把「分支对话」行与其页面注册进官方侧边栏。
+ *
+ * 这里刻意**不吞错**：真机实测（2026-10-15）壳只把失败报成 `dsh-branch-conversation: failed`
+ * （Cordis fiber 状态 = FAILED），异常原文既不在侧边栏也不在 Console，导致无法定位。
+ * 所以入口包一层：失败时把可读原因打到 `console.error`，并挂到 `window.__DSH_BRANCH__`。
  * @param ctx - 客户端根上下文。
  */
 export function apply(ctx: ClientContext): void {
+  try {
+    applyOrThrow(ctx)
+  } catch (error) {
+    const detail = error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ''}` : String(error)
+    reportFailure(detail)
+    throw error
+  }
+}
+
+/**
+ * 安全取客户端服务：先试属性读取（Cordis 常规路径，未 inject 时会抛），再退到 `ctx.get(name)`。
+ * 与 host 半的 `serviceOf` 同款理由：未 inject 的服务属性访问会**抛错**而不是给 undefined。
+ * @param scope - 客户端上下文。
+ * @param name - 服务名。
+ * @returns 服务对象或 undefined；永不抛出。
+ */
+function serviceOf<T>(scope: ClientScope, name: string): T | undefined {
+  try {
+    const direct = (scope as unknown as Record<string, unknown>)[name]
+    if (direct !== undefined && direct !== null) return direct as T
+  } catch {
+    // 未 inject：按缺失处理。
+  }
+  try {
+    const viaGet = scope.get?.(name)
+    if (viaGet !== undefined && viaGet !== null) return viaGet as T
+  } catch {
+    // get 也不可用。
+  }
+  return undefined
+}
+
+/** 把失败原因暴露出来（壳不打印它）。 */
+function reportFailure(detail: string): void {
+  try {
+    console.error(`[dsh-branch-conversation] apply 失败：\n${detail}`)
+    const scope = globalThis as unknown as { __DSH_BRANCH__?: Record<string, unknown> }
+    scope.__DSH_BRANCH__ = { failed: true, detail, at: new Date().toISOString() }
+  } catch {
+    // 诊断失败不影响原始异常。
+  }
+}
+
+/** 真正的入口逻辑；任何异常都由 {@link apply} 报告后重抛。 */
+function applyOrThrow(ctx: ClientContext): void {
   const scope = ctx as unknown as ClientScope
-  const slots = scope.slots
-  if (slots === undefined) return
+  const slots = serviceOf<SlotFace>(scope, 'slots')
+  if (slots === undefined) {
+    reportFailure('没有 slots 服务（壳没有注册座位 API），已跳过页面注册（自然降级）')
+    return
+  }
 
   // 会话目录：优先直接读上下文，其次走 ctx.get('sessions')（同类插件的做法）。
-  const sessions = scope.sessions ?? (scope.get?.('sessions') as ClientSessions | undefined)
+  const sessions = serviceOf<ClientSessions>(scope, 'sessions')
   installSessionsFace(sessions)
 
   // 导航面：切会话归工作区 UI（多实例客户端会话模型已把导航从会话控制器移走）。
-  const openSession = scope.uiWorkspace?.openSession
+  const uiWorkspace = serviceOf<{ openSession?: (sessionId: string) => void }>(scope, 'uiWorkspace')
+  const openSession = uiWorkspace?.openSession
   installNavigation(
     typeof openSession === 'function'
-      ? { openSession: (sessionId) => openSession.call(scope.uiWorkspace, sessionId) }
+      ? { openSession: (sessionId) => openSession.call(uiWorkspace, sessionId) }
       : undefined,
   )
 

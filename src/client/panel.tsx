@@ -15,6 +15,7 @@ import { branchApi, type BranchCreateValue, type BranchTreeView } from './branch
 import { useCapabilityReport } from './capability.ts'
 import { openSessionById } from './navigation.ts'
 import { isSessionNode, layoutTree, type TreeRow } from './tree-layout.ts'
+import { sessionsFace } from './use-main-session.ts'
 
 /** 导出按钮的三种格式（裁决第 4 条：JSON / Markdown / Mermaid）。 */
 const EXPORT_FORMATS = ['json', 'markdown', 'mermaid'] as const
@@ -231,7 +232,9 @@ export function BranchPanelPage({ sessionId = null }: BranchPanelProps = {}): Re
           </button>
         ) : null}
         <span className={cls.muted}>
-          {sessionId === null ? '未找到主视图会话' : `当前会话 ${sessionId}`}
+          {sessionId === null
+            ? `未找到主视图会话——${noSessionReason()}`
+            : `当前会话 ${sessionId}`}
         </span>
       </div>
 
@@ -472,6 +475,27 @@ function BranchCreateForm({
 
 function flag(value: boolean): string {
   return value ? '可用 ✓' : '不可用 ✗'
+}
+
+/**
+ * 说明"为什么没找到主视图会话"。
+ *
+ * 真机排查用：这几句话能直接把三种原因区分开——**没注入会话服务**（`sessionsFace()` 为空）、
+ * **目录里没有会话**（`byId` 为空）、**没有任何会话被主区持有**（`retainedBy.mainView` 为 0）。
+ * 不写这段的话，界面上只有一句"未找到"，无法判断是壳没给服务还是当前确实没开会话。
+ * @returns 可读原因。
+ */
+function noSessionReason(): string {
+  const face = sessionsFace()
+  if (face === undefined) return '会话目录服务不可用（ctx.get("sessions") 取不到）'
+  const list = face.list
+  if (list?.getSnapshot === undefined) return '会话目录没有 list.getSnapshot（形状不符）'
+  const snapshot = list.getSnapshot()
+  const rows = snapshot?.byId
+  if (rows === undefined || rows === null) return '会话目录快照里没有 byId'
+  const keys = Object.keys(rows)
+  if (keys.length === 0) return '会话目录快照里还没有任何会话'
+  return `目录里有 ${keys.length} 条会话，但没有一条被主区持有（retainedBy.mainView）`
 }
 
 /**
