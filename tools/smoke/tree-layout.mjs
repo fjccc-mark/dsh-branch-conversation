@@ -86,8 +86,18 @@ track('导出可用（客户端产物带 layoutTree / isSessionNode）', () => {
 })
 
 track('空树 / null：返回空行，不崩', () => {
-  assert.deepEqual(layoutTree(null), { rows: [], hiddenTotal: 0 })
-  assert.deepEqual(layoutTree(view([])), { rows: [], hiddenTotal: 0 })
+  assert.deepEqual(layoutTree(null), { rows: [], hiddenTotal: 0, hasOrphans: false })
+  assert.deepEqual(layoutTree(view([])), { rows: [], hiddenTotal: 0, hasOrphans: false })
+})
+
+track('hasOrphans：决定是否显示「拆分升根」入口', () => {
+  assert.equal(layoutTree(view([node('n1', { turn: 1 })])).hasOrphans, false)
+  assert.equal(layoutTree(view([node('n1', { turn: 1, orphan: true })])).hasOrphans, true)
+  assert.equal(
+    layoutTree(view([node('n1', { turn: 1 }), node('n2', { turn: 2, orphan: true })])).hasOrphans,
+    true,
+    '只要树上有任意孤儿节点就应提示',
+  )
 })
 
 track('轴线 + 分叉：深度与轨道前缀正确', () => {

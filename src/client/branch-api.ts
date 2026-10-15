@@ -95,4 +95,40 @@ export const branchApi = {
   openFile(nodeId: string): Promise<BranchApiResult<{ path: string }>> {
     return post('branch/open-file', { nodeId })
   },
+  /**
+   * 文件节点体检：把"文件已不存在"回写到树文档（幂等）。
+   * @param treeId - 只体检某棵树；省略表示全部。
+   */
+  auditFiles(treeId?: string): Promise<BranchApiResult<{ changed: readonly string[] }>> {
+    return post('branch/audit-files', treeId === undefined ? {} : { treeId })
+  },
+  /**
+   * 挂一个文件节点（只记原路径）。
+   * @param parentNodeId - 挂载点节点 id。
+   * @param path - 文件绝对路径。
+   */
+  attachFile(parentNodeId: string, path: string): Promise<
+    BranchApiResult<{ treeId: string; nodeId: string; path: string }>
+  > {
+    return post('branch/attach-file', { parentNodeId, path })
+  },
+  /**
+   * 导出当前树。
+   * @param sessionId - 用它定位树。
+   * @param format - json / markdown / mermaid。
+   */
+  export(
+    sessionId: string,
+    format: 'json' | 'markdown' | 'mermaid',
+  ): Promise<BranchApiResult<{ format: string; fileName: string; content: string }>> {
+    return post('branch/export', { sessionId, format })
+  },
+  /**
+   * 导出下载地址（相对路径，GET；浏览器可直接打开触发下载）。
+   * @param sessionId - 用它定位树。
+   * @param format - 目标格式。
+   */
+  exportUrl(sessionId: string, format: 'json' | 'markdown' | 'mermaid'): string {
+    return `branch/export?sessionId=${encodeURIComponent(sessionId)}&format=${format}`
+  },
 }

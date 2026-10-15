@@ -19,6 +19,7 @@ import { handleBranchRoute, type RouteDeps } from './host/routes.ts'
 import { TreeStore } from './host/tree-store.ts'
 
 export * from './core/types.ts'
+export * from './core/export.ts'
 export { TreeStore, isTreeDocument } from './host/tree-store.ts'
 export type { TreeReadResult, TreeStoreOptions, TreeWriteFailure, TreeWriteResult } from './host/tree-store.ts'
 export { BranchService, BranchFailure, isIndexDocument } from './host/branch-service.ts'

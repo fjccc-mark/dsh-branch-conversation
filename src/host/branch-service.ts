@@ -9,6 +9,7 @@
  * @module dsh-branch-conversation/host/branch-service
  */
 
+import { stat } from 'node:fs/promises'
 import {
   BRANCH_TREE_SCHEMA,
   TREE_INDEX_ID,
@@ -20,6 +21,7 @@ import {
   type SessionFacts,
   type TreeIndexDocument,
 } from '../core/types.ts'
+import { exportTree, fileNameOf, type ExportFormat } from '../core/export.ts'
 import { TreeStore, type TreeWriteFailure } from './tree-store.ts'
 import {
   createChildSession,
@@ -488,6 +490,117 @@ export class BranchService {
     return null
   }
 
+  /**
+   * 导出某个会话所在的树（裁决第 4 条：JSON / Markdown / Mermaid）。
+   * @param sessionId - 会话 id（用它定位树）。
+   * @param format - 目标格式。
+   */
+  async exportTreeOfSession(
+    sessionId: string,
+    format: ExportFormat,
+  ): Promise<{ readonly format: ExportFormat; readonly fileName: string; readonly content: string }> {
+    const view = await this.viewOfSession(sessionId)
+    return {
+      format,
+      fileName: fileNameOf(view.document, format),
+      content: exportTree(view.document, format),
+    }
+  }
+
+  /**
+   * 挂一个文件节点（裁决 A3：只记原路径，不复制、不读内容）。
+   *
+   * 挂载点用节点 id 指定，因此不会因为"父会话被删而 id 变化"而挂错位置。
+   * @param input - 挂载点节点 id 与文件绝对路径。
+   */
+  async attachFileNode(input: {
+    readonly parentNodeId: string
+    readonly path: string
+  }): Promise<{ readonly treeId: string; readonly nodeId: string; readonly path: string }> {
+    const path = input.path.trim()
+    if (path === '') throw new BranchFailure('invalid-request', 'path 不能为空')
+    const located = await this.locateNode(input.parentNodeId)
+    if (located === null) throw new BranchFailure('not-found', `挂载点节点 ${input.parentNodeId} 不存在`)
+
+    const treeId = located.treeId
+    const nodeId = this.nextNodeId()
+    const missing = !(await fileExists(path, new AbortController().signal))
+    const write = await this.store.update(treeId, (current) => {
+      if (current === null) return null
+      const fileNode: BranchNode = {
+        id: nodeId,
+        sessionId: current.root.sessionId,
+        turn: null,
+        anchorSeq: null,
+        kind: 'file',
+        label: basenameOf(path),
+        collapsed: false,
+        orphan: false,
+        children: [],
+        file: { path, missing },
+      }
+      return {
+        ...current,
+        nodes: [
+          ...current.nodes.map((node) =>
+            node.id === input.parentNodeId
+              ? { ...node, children: [...node.children, fileNode.id] }
+              : node,
+          ),
+          fileNode,
+        ],
+      }
+    })
+    if (!write.ok) throw writeFailure(write.error)
+    return { treeId, nodeId, path }
+  }
+
+  /**
+   * 文件节点体检：把"文件已不存在"的事实回写到树文档（幂等）。
+   *
+   * 只在状态真的变化时写信；读取失败（权限、路径非法）一律按"不存在"处理并写进文档，
+   * 这样用户能看到可读的提示而不是静默失败。
+   * @param treeId - 要体检的树；省略表示所有树。
+   * @param signal - 取消信号。
+   * @returns 被改动的树 id。
+   */
+  async auditFileNodes(treeId: string | undefined, signal: AbortSignal): Promise<{ changed: readonly string[] }> {
+    const targets =
+      treeId !== undefined
+        ? [treeId]
+        : (await this.store.listTreeIds()).filter((id) => id !== TREE_INDEX_ID)
+    const changed: string[] = []
+    for (const target of targets) {
+      const document = await this.readTree(target)
+      if (document === null) continue
+      const fileNodes = document.nodes.filter((node) => node.kind === 'file' && node.file !== null)
+      if (fileNodes.length === 0) continue
+
+      const verdicts = new Map<string, boolean>()
+      for (const node of fileNodes) {
+        const path = node.file?.path ?? ''
+        verdicts.set(node.id, !(await fileExists(path, signal)))
+      }
+      const needsWrite = fileNodes.some((node) => node.file?.missing !== verdicts.get(node.id))
+      if (!needsWrite) continue
+
+      const write = await this.store.update(target, (current) => {
+        if (current === null) return null
+        return {
+          ...current,
+          nodes: current.nodes.map((node) => {
+            const missing = verdicts.get(node.id)
+            if (missing === undefined || node.file === null) return node
+            return { ...node, file: { ...node.file, missing } }
+          }),
+        }
+      })
+      if (!write.ok) throw writeFailure(write.error)
+      changed.push(target)
+    }
+    return { changed }
+  }
+
   /** 诊断用的小结（不加载全部树）。 */
   async summary(): Promise<{
     readonly storageRoot: string
@@ -573,8 +686,24 @@ function labelForChild(prompt: string): string {
   return firstLine.length > 40 ? `${firstLine.slice(0, 40)}…` : firstLine
 }
 
-/** 索引文档的运行时校验（与会话 id 不会冲突，因为在存储根里是保留文件名）。 */
-export function isIndexDocument(value: unknown): value is TreeIndexDocument {
+/** 文件节点的默认标题：取路径最后一段。 */
+function basenameOf(path: string): string {
+  const parts = path.split(/[\\/]/).filter((part) => part !== '')
+  const last = parts.at(-1)
+  return last === undefined || last === '' ? path : last
+}
+
+/** 判断一个路径当前是否存在（任何读取失败都按"不存在"处理）。 */async function fileExists(path: string, signal: AbortSignal): Promise<boolean> {
+  if (path.trim() === '' || signal.aborted) return false
+  try {
+    await stat(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 索引文档的运行时校验（与会话 id 不会冲突，因为在存储根里是保留文件名）。 */export function isIndexDocument(value: unknown): value is TreeIndexDocument {
   if (value === null || typeof value !== 'object') return false
   const record = value as { schema?: unknown; trees?: unknown }
   if (typeof record.schema !== 'number') return false

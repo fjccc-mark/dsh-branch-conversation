@@ -16,6 +16,10 @@ import { useCapabilityReport } from './capability.ts'
 import { openSessionById } from './navigation.ts'
 import { isSessionNode, layoutTree, type TreeRow } from './tree-layout.ts'
 
+/** 导出按钮的三种格式（裁决第 4 条：JSON / Markdown / Mermaid）。 */
+const EXPORT_FORMATS = ['json', 'markdown', 'mermaid'] as const
+type ExportFormat = (typeof EXPORT_FORMATS)[number]
+
 /** 页面使用的全局语义类名（与 panel.css 一一对应，不经过哈希）。 */
 const cls = {
   page: 'dsh-branch-page',
@@ -136,6 +140,36 @@ export function BranchPanelPage({ sessionId = null }: BranchPanelProps = {}): Re
     }
   }, [])
 
+  /** 导出：拿到内容后在浏览器侧落成文件（不依赖宿主写盘权限）。 */
+  const onExport = useCallback(
+    async (target: string, format: ExportFormat) => {
+      const result = await branchApi.export(target, format)
+      if (!result.ok) {
+        setFailure(`导出失败（${result.error.code}）：${result.error.message}`)
+        return
+      }
+      setFailure(null)
+      setStatus(`已导出 ${result.value.fileName}（${result.value.content.length} 字符）`)
+      saveTextFile(result.value.fileName, result.value.content)
+    },
+    [],
+  )
+
+  const onSplitOrphans = useCallback(async () => {
+    const result = await branchApi.splitOrphans()
+    if (!result.ok) {
+      setFailure(`拆分升根失败（${result.error.code}）：${result.error.message}`)
+      return
+    }
+    setFailure(null)
+    setStatus(
+      result.value.changed.length === 0
+        ? '没有需要处理的孤儿节点。'
+        : `已处理：受影响的树 ${result.value.changed.join('、')}`,
+    )
+    await refresh(sessionId)
+  }, [refresh, sessionId])
+
   const created = useCallback(
     async (value: BranchCreateValue) => {
       setBranchFrom(null)
@@ -169,6 +203,33 @@ export function BranchPanelPage({ sessionId = null }: BranchPanelProps = {}): Re
         >
           刷新
         </button>
+        {tree !== null && sessionId !== null
+          ? EXPORT_FORMATS.map((format) => (
+              <button
+                key={format}
+                type="button"
+                className={cls.button}
+                title={`导出为 ${format}`}
+                onClick={() => {
+                  void onExport(sessionId, format)
+                }}
+              >
+                导出 {format === 'markdown' ? 'Markdown' : format === 'mermaid' ? 'Mermaid' : 'JSON'}
+              </button>
+            ))
+          : null}
+        {layout.hasOrphans ? (
+          <button
+            type="button"
+            className={cls.button}
+            title="把原会话已被删除的节点下的子树升为独立树"
+            onClick={() => {
+              void onSplitOrphans()
+            }}
+          >
+            处理孤儿（拆分升根）
+          </button>
+        ) : null}
         <span className={cls.muted}>
           {sessionId === null ? '未找到主视图会话' : `当前会话 ${sessionId}`}
         </span>
@@ -411,4 +472,34 @@ function BranchCreateForm({
 
 function flag(value: boolean): string {
   return value ? '可用 ✓' : '不可用 ✗'
+}
+
+/**
+ * 在浏览器侧把文本存成文件。
+ *
+ * 刻意不在 host 写盘：文件节点的语义是"引用原路径"，而导出是**用户主动下载**，
+ * 走浏览器下载既不需要宿主写权限，也不会在用户不知情时留下文件。
+ * @param fileName - 下载文件名。
+ * @param content - 文本内容。
+ */
+export function saveTextFile(fileName: string, content: string): boolean {
+  const scope = globalThis as {
+    Blob?: typeof Blob
+    URL?: { createObjectURL?: (blob: Blob) => string; revokeObjectURL?: (url: string) => void }
+    document?: { createElement: (tag: string) => { href: string; download: string; click: () => void } }
+  }
+  if (scope.Blob === undefined || scope.URL?.createObjectURL === undefined || scope.document === undefined) {
+    return false
+  }
+  try {
+    const url = scope.URL.createObjectURL(new scope.Blob([content], { type: 'text/plain;charset=utf-8' }))
+    const anchor = scope.document.createElement('a')
+    anchor.href = url
+    anchor.download = fileName
+    anchor.click()
+    scope.URL.revokeObjectURL?.(url)
+    return true
+  } catch {
+    return false
+  }
 }

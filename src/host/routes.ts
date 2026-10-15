@@ -8,6 +8,7 @@
  */
 
 import type { BranchApiError, BranchApiResult } from '../core/types.ts'
+import { contentTypeOf, isExportFormat, type ExportFormat } from '../core/export.ts'
 import { BranchFailure, MAX_PROMPT_LENGTH, type BranchService } from './branch-service.ts'
 
 /** 路由处理依赖。 */
@@ -89,6 +90,47 @@ export async function handleBranchRoute(deps: RouteDeps, request: Request): Prom
         return json({ ok: true, value: await deps.service.splitOrphans(treeId, signal) })
       }
 
+      case 'POST audit-files': {
+        const body = await readJson(request)
+        const treeId = optionalStringField(body, 'treeId')
+        return json({ ok: true, value: await deps.service.auditFileNodes(treeId, signal) })
+      }
+
+      case 'POST attach-file': {
+        const body = await readJson(request)
+        const parentNodeId = stringField(body, 'parentNodeId')
+        const path = stringField(body, 'path')
+        return json({ ok: true, value: await deps.service.attachFileNode({ parentNodeId, path }) })
+      }
+
+      case 'POST export': {
+        const body = await readJson(request)
+        const sessionId = stringField(body, 'sessionId')
+        const format = exportFormatField(body, 'format')
+        return json({ ok: true, value: await deps.service.exportTreeOfSession(sessionId, format) })
+      }
+
+      case 'GET export': {
+        // 直接下载：用 URL 查询参数，浏览器可以 <a download> 打开。
+        const sessionId = url.searchParams.get('sessionId') ?? ''
+        if (sessionId.trim() === '') {
+          return fail({ code: 'invalid-request', message: '缺少查询参数 sessionId' }, 400)
+        }
+        const format = url.searchParams.get('format') ?? 'markdown'
+        if (!isExportFormat(format)) {
+          return fail({ code: 'invalid-request', message: `不支持的导出格式：${format}` }, 400)
+        }
+        const value = await deps.service.exportTreeOfSession(sessionId, format)
+        return new Response(value.content, {
+          status: 200,
+          headers: {
+            'content-type': contentTypeOf(format),
+            'content-disposition': `attachment; filename="${value.fileName}"`,
+            'cache-control': 'no-store',
+          },
+        })
+      }
+
       default:
         return fail({
           code: 'not-found',
@@ -159,6 +201,15 @@ function optionalBooleanField(body: Record<string, unknown>, key: string): boole
   const value = body[key]
   if (value === undefined || value === null) return undefined
   if (typeof value !== 'boolean') throw new RequestBodyError(`字段 ${key} 应为布尔值`)
+  return value
+}
+
+/** 必填的导出格式字段。 */
+function exportFormatField(body: Record<string, unknown>, key: string): ExportFormat {
+  const value = body[key]
+  if (!isExportFormat(value)) {
+    throw new RequestBodyError(`字段 ${key} 应为 json / markdown / mermaid 之一`)
+  }
   return value
 }
 

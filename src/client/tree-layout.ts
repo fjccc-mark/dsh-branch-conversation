@@ -43,6 +43,8 @@ export interface TreeLayout {
   readonly rows: readonly TreeRow[]
   /** 被折叠隐藏的节点总数。 */
   readonly hiddenTotal: number
+  /** 树上是否有孤儿节点（原会话已被删除）——用于决定是否显示「拆分升根」入口。 */
+  readonly hasOrphans: boolean
 }
 
 /**
@@ -52,7 +54,7 @@ export interface TreeLayout {
  * @returns 行序列与被隐藏的节点数。
  */
 export function layoutTree(view: BranchTreeView | null): TreeLayout {
-  if (view === null) return { rows: [], hiddenTotal: 0 }
+  if (view === null) return { rows: [], hiddenTotal: 0, hasOrphans: false }
   const nodes = view.document.nodes
   const byId = new Map(nodes.map((node) => [node.id, node]))
   const childIds = new Set(nodes.flatMap((node) => [...node.children]))
@@ -99,7 +101,7 @@ export function layoutTree(view: BranchTreeView | null): TreeLayout {
   }
 
   startNodes.forEach((node, index) => walk(node.id, 0, [], index === startNodes.length - 1))
-  return { rows, hiddenTotal }
+  return { rows, hiddenTotal, hasOrphans: nodes.some((node) => node.orphan) }
 }
 
 /** 统计某个节点下面（不含自己）的节点数，用于折叠计数。 */
