@@ -172,7 +172,17 @@
   color: #16a34a;
 }
 
-/* --- 流程图（M2） --- */
+/* --- 流程图：画布 = 节点框 + 连线（Visio 式，2026-10-15 口径） ---
+ *
+ * 形态要点（F-3 / F-4 / F-8）：
+ *   `.dsh-branch-canvas`  视口：**双向滚动**的裁剪容器，窄屏下也只是滚动，不退化成文字列表；
+ *   `.dsh-branch-surface` 画布：尺寸 = `layoutTree` 的 `size`，`scale()` 由 React 内联给出（缩放）；
+ *   `.dsh-branch-wires`   SVG 覆盖层：所有连线，`pointer-events:none` 不拦点击；
+ *   `.dsh-branch-node`    节点框：绝对定位在 `left/top`，固定 208×62，**可见边框**。
+ *
+ * 关键：画布里的坐标一律是 `layoutTree` 给的画布坐标，CSS 不参与"排版节点"，
+ * 只负责"把框画出来"。任何位置错误都应该出在纯函数里（可单测），而不是在 CSS 里。
+ */
 
 .dsh-branch-toolbar {
   display: flex;
@@ -190,127 +200,184 @@
   overflow-wrap: anywhere;
 }
 
-.dsh-branch-tree {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+.dsh-branch-canvas {
+  /* 高度自适应但有上限：画布自己滚，绝不把窗口整体撑高（F-5 的排版兜底断言）。 */
+  position: relative;
+  height: 62vh;
+  min-height: 260px;
+  max-height: 720px;
+  max-width: 100%;
+  min-width: 0;
+  overflow: auto;
+  border: 1px solid rgba(128, 128, 128, 0.28);
+  border-radius: 10px;
+  background-color: rgba(128, 128, 128, 0.04);
+  /* 点状网格：给"这是画布而不是列表"的观感（不影响几何量测）。 */
+  background-image: radial-gradient(rgba(128, 128, 128, 0.22) 1px, transparent 1px);
+  background-size: 18px 18px;
+  overscroll-behavior: contain;
+}
+
+.dsh-branch-surface {
+  position: relative;
+  /* 缩放围绕左上角：这样滚动位置与画布坐标仍然一一对应。 */
+  transform-origin: 0 0;
+}
+
+.dsh-branch-wires {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+  /* 线不拦点击：框仍然是唯一可点的东西。 */
+  pointer-events: none;
+}
+
+.dsh-branch-wire-main,
+.dsh-branch-wire-branch {
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  /* 与 JS 侧一致的线宽：缩放时整层一起缩放，所以不用手改。 */
+  stroke-width: 1.6;
+}
+
+/* 主轴（同一会话相邻轮次）= 实线，B10 的"轴线" */
+.dsh-branch-wire-main {
+  stroke: rgba(120, 170, 255, 0.85);
+}
+
+/* 分支（跨会话 / 文件节点）= 虚线，一眼能分开"继续"与"岔开" */
+.dsh-branch-wire-branch {
+  stroke: rgba(200, 160, 90, 0.9);
+  stroke-dasharray: 5 3;
+}
+
+.dsh-branch-node {
+  position: absolute;
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-  max-width: 100%;
-  /* 深树兜底：轨道 + 三角 + 「＋」的固定宽度加起来可能超过容器，
-     这时**在树内横向滚动**，而不是让内容跑出中央列（跑出去就会被裁掉、"＋" 点不到）。 */
-  overflow-x: auto;
-  font-size: 12.5px;
-  line-height: 1.9;
+  gap: 3px;
+  padding: 6px 8px;
+  /* 固定的框：宽高由 `layoutTree` 决定（内联），这里只保证"看得见边框"。 */
+  border: 1px solid rgba(128, 128, 128, 0.5);
+  border-radius: 8px;
+  background: rgba(28, 30, 36, 0.94);
+  color: inherit;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.25;
 }
 
-.dsh-branch-tree-row {
+.dsh-branch-node-current {
+  border-color: rgba(120, 170, 255, 0.95);
+  box-shadow: 0 0 0 1px rgba(120, 170, 255, 0.45);
+}
+
+.dsh-branch-node-orphan {
+  opacity: 0.6;
+  border-style: dashed;
+}
+
+.dsh-branch-node-missing {
+  border-color: rgba(217, 119, 6, 0.9);
+}
+
+.dsh-branch-node-top {
   display: flex;
   align-items: center;
-  gap: 6px;
-  /* 关键：行必须**撑满容器宽度**，不能由内容决定宽度。
-     若宽度由内容决定，行内标签的 `max-width: 100%` 就变成循环依赖，
-     浏览器会退回用文字固有宽度，把整行（乃至整个中央列）顶宽。 */
-  width: 100%;
-  box-sizing: border-box;
+  gap: 5px;
   min-width: 0;
-  max-width: 100%;
+  flex: 0 0 auto;
+}
+
+.dsh-branch-node-turn {
+  font-size: 10.5px;
+  opacity: 0.75;
   white-space: nowrap;
-  /* 兜底：轨道 + 三角 + 「＋」的固定宽度超过容器时，最坏是裁掉标题尾部，
-     内容不会跑到中央列之外（要滚动请在 `.dsh-branch-tree` 上滚）。 */
-  overflow: hidden;
+  flex: 0 0 auto;
 }
 
-.dsh-branch-tree-rails {
-  /* 可压缩：极窄容器下允许轨道被裁（右侧的 `├─/└─` 与 `⋯` 在尾部，裁左边不影响"分支在哪"）。
-     最窄档还有 `overflow-x: auto` 兜底，所以最坏情况是横向滚一下，而不是点不到「＋」。 */
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
-  opacity: 0.4;
-  white-space: pre;
+.dsh-branch-node-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(120, 170, 255, 0.9);
 }
 
-.dsh-branch-tree-label,
-.dsh-branch-tree-current,
-.dsh-branch-tree-orphan,
-.dsh-branch-tree-missing {
-  font: inherit;
-  font-size: 12.5px;
-  padding: 1px 6px;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-  text-align: left;
-  /* 长标题在这里截断：能压缩、不换行、超出用省略号（完整内容在 title 里）。
-     注意：`flex: 0 1 auto` 不够——弹性项的最小宽度默认是**内容最小宽度**，长标题会顶宽父容器；
-     必须同时给 `min-width: 0`，并用 `max-width: 100%` 把按钮的可视宽锁在行容器内。 */
-  flex: 0 1 auto;
+.dsh-branch-node-meta {
+  flex: 1 1 auto;
   min-width: 0;
-  max-width: 100%;
-  /* 行宽已由 `.dsh-branch-tree-row` 的 `width: 100%` 定死；这里再加一道保险：
-     万一内部固定项（轨道 + 两个按钮）本身就超过容器，最坏也只是裁掉一点标题，
-     绝不会让内容跑到中央列外面去。 */
+  font-size: 10px;
+  color: #d97706;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.dsh-branch-tree-label:hover:not(:disabled),
-.dsh-branch-tree-current:hover:not(:disabled) {
-  background: rgba(128, 128, 128, 0.16);
-}
-
-.dsh-branch-tree-current {
-  font-weight: 600;
-  border-color: rgba(128, 128, 128, 0.45);
-}
-
-.dsh-branch-tree-orphan {
-  opacity: 0.55;
-  text-decoration: line-through;
-  cursor: not-allowed;
-}
-
-.dsh-branch-tree-missing {
-  opacity: 0.7;
-  color: #d97706;
-}
-
-.dsh-branch-tree-badge {
-  flex: 0 0 auto;
-  font-size: 11px;
-  opacity: 0.55;
-  white-space: nowrap;
-}
-
-.dsh-branch-tree-actions {
-  display: inline-flex;
-  flex: 0 0 auto;
-  gap: 4px;
-  margin-left: auto;
-  padding-left: 4px;
-}
-
-.dsh-branch-button-tiny {
+.dsh-branch-node-handle,
+.dsh-branch-node-plus {
   font: inherit;
-  font-size: 11.5px;
+  font-size: 11px;
   line-height: 1;
-  padding: 3px 6px;
+  padding: 2px 5px;
   border: 1px solid rgba(128, 128, 128, 0.35);
   border-radius: 5px;
   background: transparent;
   color: inherit;
   cursor: pointer;
+  flex: 0 0 auto;
 }
 
-.dsh-branch-button-tiny:hover:not(:disabled) {
-  background: rgba(128, 128, 128, 0.18);
+.dsh-branch-node-plus {
+  margin-left: auto;
+}
+
+.dsh-branch-node-handle:hover,
+.dsh-branch-node-plus:hover {
+  background: rgba(128, 128, 128, 0.2);
+}
+
+.dsh-branch-node-title {
+  font: inherit;
+  font-size: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  /* 长标题在框内截断两行：完整内容在 title 里，框尺寸恒定（否则重叠判定没意义）。 */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.dsh-branch-node-title:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.dsh-branch-node-title:disabled {
+  cursor: not-allowed;
+  opacity: 0.75;
+}
+
+.dsh-branch-node-count {
+  flex: 0 0 auto;
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+.dsh-branch-canvas:focus-visible,
+.dsh-branch-node-title:focus-visible,
+.dsh-branch-node-handle:focus-visible,
+.dsh-branch-node-plus:focus-visible {
+  outline: 2px solid rgba(120, 170, 255, 0.9);
+  outline-offset: 1px;
 }
 
 .dsh-branch-empty {
@@ -323,9 +390,10 @@
  *
  * 用**容器查询**而不是视口媒体查询：这个页面的可用宽度取决于官方侧边栏占多少，
  * 视口宽并不等于页面宽。容器查询直接量 `.dsh-branch-page` 自己的宽度，语义更准。
- * 目标是"宁可少显示信息，也不让按钮被挤出容器"：
- *   - 折叠三角与「＋」是操作入口，**永远保留**；
- *   - 「第 N 轮」「文件不存在」等徽标是辅助信息，窄容器下让位（完整信息仍在 title 与导出里）。
+ * 目标是"宁可少显示信息，也不让操作入口消失"：
+ *   - 折叠把手与「＋」是操作入口，**永远保留**；
+ *   - 「第 N 轮」「文件不存在」等徽标是辅助信息，窄容器下让位（完整信息仍在 title 与导出里）；
+ *   - **画布永远是"框 + 线"**：变窄只会让滚动条出现/自动缩小，不会退化成文字列表。
  *
  * 注意：`container-type: inline-size` 的元素**不能**用 `@container` 查询来修饰自己
  * （只能修饰后代），所以 `.dsh-branch-page` 自身的内边距不在这里改。
@@ -336,8 +404,8 @@
 }
 
 @container branch-page (max-width: 560px) {
-  /* 徽标与冗余长度让位：宽度先给"轨道 + 三角 + ＋ + 一行标题"这四样必需的。 */
-  .dsh-branch-tree-badge {
+  /* 徽标与冗余长度让位：宽度先给"把手 + 轮次 + ＋ + 框内的标题"。 */
+  .dsh-branch-node-meta {
     display: none;
   }
 
@@ -348,30 +416,26 @@
   .dsh-branch-button {
     padding: 5px 9px;
   }
+
+  .dsh-branch-canvas {
+    height: 52vh;
+  }
 }
 
 @container branch-page (max-width: 380px) {
-  /* 极窄：工具栏与树再收紧一档，尽量减少需要横向滚动的程度。 */
+  /* 极窄：工具栏与画布再收紧一档；框的固定尺寸由 `layoutTree` 给，靠缩放与滚动适配。 */
   .dsh-branch-toolbar {
     font-size: 12px;
   }
 
-  .dsh-branch-tree {
-    font-size: 12px;
+  .dsh-branch-canvas {
+    height: 46vh;
+    min-height: 200px;
   }
 
-  /* 轨道、三角、＋ 三样固定宽加起来必须**塞得进一个很窄的中央列**，
-     所以这一档把间距与按钮内边距都压到最小（仍保证可点：至少 14px 见方）。 */
-  .dsh-branch-tree-row {
-    gap: 3px;
-  }
-
-  .dsh-branch-tree-rails {
-    font-size: 10px;
-  }
-
-  .dsh-branch-button-tiny {
-    padding: 2px 3px;
+  .dsh-branch-node-handle,
+  .dsh-branch-node-plus {
+    padding: 1px 3px;
   }
 }
 

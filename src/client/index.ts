@@ -26,8 +26,16 @@ export { branchApi } from './branch-api.ts'
 export type { BranchCreateValue, BranchTreeView } from './branch-api.ts'
 export { canOpenSession, installNavigation, openSessionById } from './navigation.ts'
 export type { NavigationFace } from './navigation.ts'
-export { isSessionNode, layoutTree } from './tree-layout.ts'
-export type { TreeLayout, TreeRow } from './tree-layout.ts'
+export {
+  isSessionNode,
+  layoutTree,
+  LEVEL_GAP,
+  NODE_H,
+  NODE_W,
+  PADDING,
+  ROW_GAP,
+} from './tree-layout.ts'
+export type { TreeBox, TreeEdge, TreeLayout, TreeSize } from './tree-layout.ts'
 export {
   installSessionsFace,
   mainViewSessionIdOf,

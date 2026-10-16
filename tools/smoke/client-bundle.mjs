@@ -37,6 +37,15 @@ const track = (name, fn) =>
 
 const source = await readFile(bundlePath, 'utf8')
 
+// 页面组件在渲染时会发一次诊断请求；给它一个假 fetch，别让 Node 的真 fetch
+// 因为拿到空 URL 而抛错、把冒烟进程的退出码弄脏（见 fakeFetch 的注释）。
+installStubFetch()
+
+/** 装上假 `fetch`，并返回卸载函数。 */
+function installStubFetch() {
+  globalThis.fetch = fakeFetch
+}
+
 /**
  * 假文档：只实现插件样式注入用到的部分（`head.appendChild` + `querySelector`）。
  * @returns {{ document: any; styles: any[] }} 假 document 与它收到过的 `<style>`。
@@ -65,13 +74,41 @@ function installFakeDocument() {
   return { document: fakeDocument, styles }
 }
 
-/** 假 React：只需要能满足 hooks 调用与元素创建。 */
+/**
+ * 假 React：只需要能满足 hooks 调用与元素创建。
+ *
+ * ⚠️ `useRef` / `useLayoutEffect` 是 M6 画布化时补的：面板用 `useRef` 拿画布视口宽度，
+ * 用 `useLayoutEffect` 做"首次进画布自动缩放到适配宽度"。假 React 缺一个 hook，
+ * `page.component()` 就会直接抛 `(0, react.useXxx) is not a function`，
+ * 而且报错信息看起来像产物坏了——所以**页面每加一个 hook，这里都要同步补上**。
+ * @type {Record<string, unknown>}
+ */
 const reactStub = {
   useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}],
   useEffect: () => {},
+  useLayoutEffect: () => {},
   useCallback: (fn) => fn,
   useMemo: (fn) => fn(),
+  useRef: (initial) => ({ current: initial ?? null }),
   createElement: (type, props, ...children) => ({ type, props: { ...(props ?? {}), children } }),
+}
+
+/**
+ * 假 `fetch`：页面里的 `useCapabilityReport()` 会立刻发一个诊断请求。
+ *
+ * 为什么必须装：Node 的全局 `fetch` 拿到 `undefined` URL 会**同步抛**
+ * `Failed to parse URL`，这个异常发生在 `useEffect` 里、没人 catch，
+ * 于是整个冒烟进程以退出码 1 结束——**断言全绿但 CI 判失败**（这种"假红"最耗排查时间）。
+ * 装一个返回空 `{}` 的假 fetch，那条诊断只会拿到"接口返回异常"，不会污染进程状态。
+ * @param {string} _url - 请求地址（忽略）。
+ * @param {unknown} _init - 请求参数（忽略）。
+ * @returns 一个永远成功的假响应。
+ */
+function fakeFetch(_url, _init) {
+  return Promise.resolve({
+    ok: true,
+    json: () => Promise.resolve({ ok: false, error: { message: '冒烟环境没有 host' } }),
+  })
 }
 
 /** 模块表：键是平台模块名，值是模块对象。 */
@@ -234,12 +271,62 @@ track('行图标与页面组件都能作为 React 元素渲染（假 React 驱�
   assert.equal(pageElement.props['data-dsh-plugin'], 'branch-conversation')
 })
 
-track('样式随产物发布：__DSH_BRANCH_CSS__ 有内容，且关键窄屏规则都在里面', () => {
+track('页面初始态（还没读到树）不画空画布，只给一句可读提示', () => {
+  const registrations = []
+  exports.apply({
+    slots: {
+      inject: (_key, callback) => callback(),
+      register: (options, component) => {
+        registrations.push({ options, component })
+        return () => {}
+      },
+    },
+  })
+  const page = registrations.find((entry) => entry.options.name === 'main')
+  const element = page.component({ sessionId: null })
+  assert.equal(element.props['data-dsh-branch-view'], '', '页面根节点缺少画布页标记')
+
+  /**
+   * 在假 React 下递归收集元素（`useState` 返回初始值，所以这棵树就是"首帧"）。
+   * @param node - jsx 元素或任意值。
+   * @param found - 收集结果。
+   * @returns 命中的元素数组。
+   */
+  const flatten = (node, found = []) => {
+    if (node === null || node === undefined || typeof node !== 'object') return found
+    if (Array.isArray(node)) {
+      for (const item of node) flatten(item, found)
+      return found
+    }
+    if ('type' in node && 'props' in node) {
+      found.push(node)
+      flatten(node.props?.children, found)
+    }
+    return found
+  }
+  const elements = flatten(element)
+  const canvas = elements.filter((item) => item.props?.['data-dsh-branch-canvas'] !== undefined)
+  assert.equal(canvas.length, 0, '还没有树时不该渲染空画布（否则量测会把空画布当"形态达标"）')
+  const empty = elements.filter((item) => item.props?.className === 'dsh-branch-empty')
+  assert.equal(empty.length, 1, '应当给一句"还没有树"的可读提示')
+})
+
+track('样式随产物发布：__DSH_BRANCH_CSS__ 有内容，且关键画布规则都在里面', () => {
   // 构建时把样式挂在 **window** 上（浏览器里它就是全局对象）；测试里的假 window 也是同一个。
   const css = globalThis.window?.__DSH_BRANCH_CSS__
   assert.equal(typeof css, 'string', '产物没有设置 window.__DSH_BRANCH_CSS__')
   assert.ok(css.length > 1000, `样式太短，疑似没注入：${css.length} 字符`)
-  for (const rule of ['.dsh-branch-page', '.dsh-branch-tree-row', 'container-type', 'overflow-x']) {
+  // M6 画布化后，关键规则从"树行/轨道"换成"画布 + 节点框 + 连线层"：
+  // 这几条任何一条丢了，形态都会退回"纯文字列表"或"没有边框的框"。
+  for (const rule of [
+    '.dsh-branch-page',
+    '.dsh-branch-canvas',
+    '.dsh-branch-surface',
+    '.dsh-branch-node',
+    '.dsh-branch-wire-main',
+    'container-type',
+    'overflow',
+  ]) {
     assert.ok(css.includes(rule), `样式里缺少 ${rule}`)
   }
   assert.equal(typeof exports.installPanelStyle, 'function', '没有导出 installPanelStyle')
