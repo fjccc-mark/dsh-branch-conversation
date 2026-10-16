@@ -227,6 +227,208 @@ try {
       '先用会话正常问答再点「刷新」，或换一个已经有分支的会话。',
   )
 
+  // ---------------------------------------------------------------------------
+  // F-6：与官方面板来回切换——页面状态（当前树 / 折叠 / **缩放与滚动位置**）必须保持
+  // ---------------------------------------------------------------------------
+  console.log('\n=== F-6：切到别的面板再切回来，状态要保持 ===')
+
+  /** 面板行：官方侧边栏里每一行都是一个 `button[class*="_panelRow"]`，标签写在文本里。 */
+  const rowSelector = 'button[class*="_panelRow"]'
+  const panelLabels = await evaluate(`JSON.stringify([...document.querySelectorAll('${rowSelector}')]
+    .map(el => (el.textContent || '').trim().replace(/\\s+/g, ' ')))`)
+  console.log(`      侧边栏面板行：${panelLabels}`)
+
+  /**
+   * 点侧边栏里某个面板行；返回它的可读标签。找不到就返回 null（调用方据此判断要不要跳过 F-6）。
+   * @param {string} matchText - 标签里包含的文字。
+   */
+  const clickPanelRow = (matchText) =>
+    evaluate(`(() => {
+      const row = [...document.querySelectorAll('${rowSelector}')]
+        .find(el => (el.textContent || '').includes(${JSON.stringify(matchText)}))
+      if (row === undefined) return null
+      row.click()
+      return (row.textContent || '').trim()
+    })()`)
+
+  /** 基准状态：缩放、画布滚动位置、当前树/节点分布。 */
+  const stateOf = async () =>
+    JSON.parse(
+      await evaluate(`JSON.stringify({
+        zoom: document.querySelector('[data-dsh-branch-zoom]')?.getAttribute('data-dsh-branch-zoom') ?? null,
+        canvasScroll: (() => { const c = document.querySelector('[data-dsh-branch-canvas]'); return c ? { left: c.scrollLeft, top: c.scrollTop } : null })(),
+        pageScroll: (() => { const p = document.querySelector('[data-dsh-branch-view]'); return p ? { left: p.scrollLeft, top: p.scrollTop } : null })(),
+        treeHint: (document.querySelector('[data-dsh-branch-view] .dsh-branch-hint')?.textContent ?? '').trim(),
+        nodes: [...document.querySelectorAll('[data-dsh-branch-node]')].map(el => el.getAttribute('data-dsh-branch-node')).join(','),
+        collapsed: [...document.querySelectorAll('[data-dsh-branch-node][data-dsh-branch-collapsed="true"]')].map(el => el.getAttribute('data-dsh-branch-node')).join(','),
+        url: location.href,
+        targets: null
+      })`),
+    )
+
+  const beforeSwitch = await stateOf()
+
+  /**
+   * 把状态"弄花"：**放大到最大**让画布真的可滚，再滚到非零位置。
+   *
+   * 两个坑都在这里踩过：
+   *   ① 连点 8 次"放大"必须**每次之间让 React 重渲染**（`await` 一拍）——在同一个 JS 任务里连点，
+   *      每次读到的都是旧 state，`applyZoom(1×1.2)` 全是同一个值，结果只放大了一档（实测 120%）；
+   *   ② 100% 时内容往往还在视口内，`scrollLeft/Top` 设了也只能是 0，那样的"滚动位置保持"是**空验**。
+   *      所以这里放大到上限，并要求真的滚起来（拿不到非零滚动就如实报"没验到"）。
+   */
+  const zoomSteps = []
+  for (let step = 0; step < 10; step += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    const clicked = await evaluate(`(() => {
+      const btn = [...document.querySelectorAll('[data-dsh-branch-view] button')].find(b => (b.getAttribute('aria-label') || '') === '放大画布')
+      if (!btn || btn.disabled) return false
+      btn.click()
+      return true
+    })()`)
+    if (clicked !== true) break
+    zoomSteps.push(step)
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((done) => setTimeout(done, 250))
+  }
+  const zoomNow = await evaluate(`document.querySelector('[data-dsh-branch-zoom]')?.getAttribute('data-dsh-branch-zoom') ?? null`)
+  console.log(`      放大点了 ${zoomSteps.length} 次，当前缩放 ${zoomNow}%`)
+
+  const scrollAttempt = await evaluate(`(() => {
+    const c = document.querySelector('[data-dsh-branch-canvas]')
+    const p = document.querySelector('[data-dsh-branch-view]')
+    if (c) { c.scrollLeft = 400; c.scrollTop = 300 }
+    if (p) { p.scrollTop = 200 }
+    return JSON.stringify({
+      canvas: c ? { left: c.scrollLeft, top: c.scrollTop, maxLeft: c.scrollWidth - c.clientWidth, maxTop: c.scrollHeight - c.clientHeight } : null,
+      page: p ? { top: p.scrollTop, maxTop: p.scrollHeight - p.clientHeight } : null
+    })
+  })()`)
+  await new Promise((done) => setTimeout(done, CLICK_SETTLE_MS))
+  const dirtied = await stateOf()
+  console.log(`      弄花后：缩放 ${dirtied.zoom}；画布滚动 ${JSON.stringify(dirtied.canvasScroll)}；页面滚动 ${JSON.stringify(dirtied.pageScroll)}`)
+  console.log(`      可滚范围：${scrollAttempt}`)
+  if (zoomSteps.length === 0) console.log('      ⚠ 没点到"放大画布"按钮，缩放这一步没做成（下面的缩放断言会因此失败）')
+
+  // 切到别的面板（优先"插件"；没有就挑一个不是本插件的行），再切回来。
+  const otherLabel = await clickPanelRow('插件')
+  const switchedAway = otherLabel !== null
+  if (switchedAway) await new Promise((done) => setTimeout(done, CLICK_SETTLE_MS))
+  const whileAway = await stateOf()
+  const awayHasOurPage = whileAway.nodes.length > 0 || whileAway.zoom !== null
+  if (switchedAway) {
+    check(
+      '**F-6**：切到「插件」面板后本插件页面已卸载（没有残留的框/缩放控件）',
+      !awayHasOurPage,
+      '切走后仍能查到本插件的 DOM，说明面板切换没有真的卸载它',
+    )
+  } else {
+    console.log('      ⚠ 侧边栏里没找到「插件」行，F-6 的"切走"这一步跳过')
+  }
+
+  const backLabel = await clickPanelRow('分支对话')
+  check('能从官方面板切回「分支对话」', backLabel !== null)
+  if (backLabel !== null) await new Promise((done) => setTimeout(done, CLICK_SETTLE_MS))
+  const afterSwitch = await stateOf()
+
+  check(
+    '**F-6**：切回来后缩放位置保持',
+    afterSwitch.zoom === dirtied.zoom && afterSwitch.zoom !== null,
+    `切走前 ${dirtied.zoom}，切回后 ${afterSwitch.zoom}`,
+  )
+  const scrolledBefore = dirtied.canvasScroll
+  const scrolledAfter = afterSwitch.canvasScroll
+  const scrollWasMeaningful = scrolledBefore !== null && (scrolledBefore.left > 0 || scrolledBefore.top > 0)
+  check(
+    '**F-6**：切回来后画布滚动位置保持',
+    scrollWasMeaningful && JSON.stringify(scrolledAfter) === JSON.stringify(scrolledBefore),
+    scrollWasMeaningful
+      ? `切走前 ${JSON.stringify(scrolledBefore)}，切回后 ${JSON.stringify(scrolledAfter)}`
+      : `滚动画布没成功（切走前是 ${JSON.stringify(scrolledBefore)}，无法证明"保持"）——` +
+        '放大到 200% 后画布仍不可滚，说明内容没超出视口，这条**没验到**',
+  )
+  const pageScrolledBefore = dirtied.pageScroll
+  if (pageScrolledBefore !== null && pageScrolledBefore.top > 0) {
+    check(
+      '**F-6**：切回来后页面滚动位置保持',
+      JSON.stringify(afterSwitch.pageScroll) === JSON.stringify(pageScrolledBefore),
+      `切走前 ${JSON.stringify(pageScrolledBefore)}，切回后 ${JSON.stringify(afterSwitch.pageScroll)}`,
+    )
+  } else {
+    console.log('      （页面本身没滚动空间，页面滚动这条不适用）')
+  }
+  check(
+    '**F-6**：切回来后当前树与节点集合保持',
+    afterSwitch.treeHint === dirtied.treeHint && afterSwitch.nodes === dirtied.nodes,
+    `树提示 ${JSON.stringify(dirtied.treeHint)} → ${JSON.stringify(afterSwitch.treeHint)}；节点 ${dirtied.nodes} → ${afterSwitch.nodes}`,
+  )
+  check(
+    '**F-6**：折叠状态保持',
+    afterSwitch.collapsed === dirtied.collapsed,
+    `折叠节点 ${JSON.stringify(dirtied.collapsed)} → ${JSON.stringify(afterSwitch.collapsed)}`,
+  )
+  check(
+    '**F-6 / F-2**：来回切换全程地址栏没跳转（仍是同一个页面）',
+    afterSwitch.url === beforeSwitch.url,
+    `切换前 ${beforeSwitch.url}，切换后 ${afterSwitch.url}`,
+  )
+
+  // ---------------------------------------------------------------------------
+  // F-7：形态反例回归——不许塞进 56px 侧边栏、不许独立窗口/URL、不许退回缩进列表
+  // ---------------------------------------------------------------------------
+  console.log('\n=== F-7：形态反例回归（塞侧边栏 / 独立窗口 / 退回列表）===')
+
+  const guard = JSON.parse(
+    await evaluate(`JSON.stringify({
+      sidebarWidth: (() => {
+        const row = [...document.querySelectorAll('${rowSelector}')].find(el => (el.textContent || '').includes('分支对话'))
+        const nav = row ? row.closest('div,aside,nav') : null
+        return nav ? Math.round(nav.getBoundingClientRect().width) : null
+      })(),
+      pageRect: (() => { const p = document.querySelector('[data-dsh-branch-view]'); if (!p) return null; const r = p.getBoundingClientRect(); return { w: Math.round(r.width), h: Math.round(r.height), left: Math.round(r.left) } })(),
+      inSidebarRow: (() => {
+        const p = document.querySelector('[data-dsh-branch-view]')
+        const row = [...document.querySelectorAll('${rowSelector}')].find(el => (el.textContent || '').includes('分支对话'))
+        return Boolean(p && row && row.contains(p))
+      })(),
+      boxes: document.querySelectorAll('[data-dsh-branch-node]').length,
+      wires: document.querySelectorAll('.dsh-branch-wires path').length,
+      canvas: document.querySelectorAll('[data-dsh-branch-canvas]').length,
+      railChars: (() => {
+        const scope = document.querySelector('.dsh-branch-canvas')
+        if (!scope) return null
+        return (scope.textContent || '').split('').filter(ch => '│├└─'.includes(ch)).length
+      })(),
+      url: location.href
+    })`),
+  )
+  console.log(`      侧边栏宽 ${guard.sidebarWidth}px；本插件页面 ${guard.pageRect?.w}×${guard.pageRect?.h}（left=${guard.pageRect?.left}）`)
+
+  check(
+    '**F-7**：本插件页面**不在侧边栏行内部**（没被塞进窄轨道）',
+    guard.inSidebarRow === false,
+  )
+  check(
+    '**F-7**：页面占的是中央列（宽度远大于侧边栏）',
+    guard.pageRect !== null && guard.pageRect.w > 400 && (guard.sidebarWidth === null || guard.pageRect.w > guard.sidebarWidth * 2),
+    `页面宽 ${guard.pageRect?.w}，侧边栏宽 ${guard.sidebarWidth}`,
+  )
+  check(
+    '**F-7**：仍是"框 + 连线"（没有退回缩进列表）',
+    guard.canvas === 1 && guard.boxes > 0 && guard.wires > 0,
+    `画布 ${guard.canvas} 个 / 框 ${guard.boxes} 个 / 连线 ${guard.wires} 条`,
+  )
+  check(
+    '**F-7**：画布里没有任何 `│├└─` 轨道字符',
+    guard.railChars === 0,
+    `轨道字符 ${guard.railChars} 个`,
+  )
+  check(
+    '**F-7 / F-2**：没有另开窗口/新标签页（地址未变、只有一个 target）',
+    guard.url === beforeSwitch.url,
+    `地址 ${beforeSwitch.url} → ${guard.url}`,
+  )
+
   const shot = resolve(OUT_DIR, 'real-machine.png')
   const image = await cdp.send('Page.captureScreenshot', { format: 'png' }, session)
   await writeFile(shot, Buffer.from(image.data, 'base64'))

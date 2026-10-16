@@ -37,6 +37,17 @@ export {
 } from './tree-layout.ts'
 export type { TreeBox, TreeEdge, TreeLayout, TreeSize } from './tree-layout.ts'
 export {
+  canAutoFit,
+  captureScroll,
+  DEFAULT_VIEW_STATE,
+  readViewState,
+  resetViewState,
+  restoreScroll,
+  setViewScroll,
+  setViewZoom,
+} from './view-state.ts'
+export type { PanelViewState, ScrollOffset } from './view-state.ts'
+export {
   installSessionsFace,
   mainViewSessionIdOf,
   sessionsFace,

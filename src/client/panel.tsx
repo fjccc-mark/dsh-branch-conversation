@@ -21,6 +21,7 @@ import { useCapabilityReport } from './capability.ts'
 import { openSessionById, subscribeNavigationReady } from './navigation.ts'
 import { isSessionNode, layoutTree, type TreeBox, type TreeLayout } from './tree-layout.ts'
 import { sessionsFace, sessionsFaceReady } from './use-main-session.ts'
+import { canAutoFit, captureScroll, readViewState, restoreScroll, setViewZoom } from './view-state.ts'
 
 /** 导出按钮的三种格式（裁决第 4 条：JSON / Markdown / Mermaid）。 */
 const EXPORT_FORMATS = ['json', 'markdown', 'mermaid'] as const
@@ -108,8 +109,10 @@ export function BranchPanelPage({ sessionId = null }: BranchPanelProps = {}): Re
   const [status, setStatus] = useState<string | null>(null)
   const [failure, setFailure] = useState<string | null>(null)
   const [branchFrom, setBranchFrom] = useState<TreeBox | null>(null)
-  const [zoom, setZoom] = useState(1)
+  // 缩放取自**模块级视图状态**：官方 shell 切面板会卸载本页，`useState` 活不过去（F-6 实测）。
+  const [zoom, setZoom] = useState(() => readViewState().zoom)
   const viewportRef = useRef<HTMLDivElement | null>(null)
+  const pageRef = useRef<HTMLDivElement | null>(null)
 
   const refresh = useCallback(async (target: string | null) => {
     if (target === null) {
@@ -139,22 +142,12 @@ export function BranchPanelPage({ sessionId = null }: BranchPanelProps = {}): Re
    * 首次拿到一张非空画布时**自动缩小到适配宽度**（窄屏 F-5：不退化，只是字号与显示量收敛）。
    *
    * 为什么只在首次做：用户一旦自己缩放（或点了 100%），后续刷新不该把他的缩放改回去。
-   * `useLayoutEffect` 是为了在首帧量到容器宽度，避免先以 100% 闪一下再跳。
+   * 这个"是否已定下来"记在**模块级视图状态**里而不是 ref 里——切面板会卸载重挂，
+   * ref 会重置，用 ref 的话每次切回来都会被自动适配改一次缩放（F-6 实测就是这个）。
+   *
+   * 注意 `applyZoom` 必须在下面声明之后再被"调用"：`useLayoutEffect` 的**回调**是挂载后才跑的，
+   * 所以这里把 effect 放在 `applyZoom` 定义**之后**（否则 TS 会报"变量在声明前使用"）。
    */
-  const didAutoFit = useRef(false)
-  useLayoutEffect(() => {
-    if (didAutoFit.current || layout.nodes.length === 0) return
-    const viewport = viewportRef.current
-    if (viewport === null) return
-    didAutoFit.current = true
-    const available = viewport.clientWidth - 2
-    if (available <= 0) return
-    const fit = Math.min(1, available / layout.size.width)
-    // 下限就是 ZOOM_MIN（30%）：再小文字就看不清了，宁可让用户横向滚一下，
-    // 也不要把整棵树压成一片看不清的灰块（"不退化"指的是不退化成列表，不是不让人读字）。
-    if (fit < 1) setZoom(Math.max(ZOOM_MIN, Math.round(fit * 100) / 100))
-  }, [layout.nodes.length, layout.size.width])
-
   const onOpenFile = useCallback(async (box: TreeBox) => {
     const result = await branchApi.openFile(box.id)
     setFailure(result.ok ? null : `${result.error.code}：${result.error.message}`)
@@ -189,11 +182,68 @@ export function BranchPanelPage({ sessionId = null }: BranchPanelProps = {}): Re
     [],
   )
 
-  /** 缩放：夹在 30%~200%，按 5% 取整便于断言与阅读。 */
+  /** 缩放：夹在 30%~200%，按 5% 取整便于断言与阅读；同时记进模块级视图状态。 */
+  /** 缩放：夹在 30%~200%，按 5% 取整便于断言与阅读；同时记进模块级视图状态。 */
   const applyZoom = useCallback((next: number) => {
     const clamped = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, next))
-    setZoom(Math.round(clamped * 100) / 100)
+    const rounded = Math.round(clamped * 100) / 100
+    // `byUser: true`：用户调过之后，自动适配就再也不许插手（否则切面板回来会抢走用户的选择）。
+    setViewZoom(rounded, true)
+    setZoom(rounded)
   }, [])
+
+  /**
+   * 画布有内容时按容器宽**自动缩放**到适配（窄屏 F-5：不退化，只是字号与显示量收敛）。
+   *
+   * 两条边界（都踩过）：
+   *   ① **用户手动调过缩放就不再适配**（`canAutoFit()`）——否则用户拖窄窗口/切面板回来，
+   *      缩放会被悄悄改掉；
+   *   ② 适配值随"宽高或框数"变化重算，所以换会话/折叠后也会重新适配——
+   *      早先用"是否已适配过"当门禁，导致**第一次之后永不再适配**（换会话也不适配），是个退化。
+   */
+  useLayoutEffect(() => {
+    if (layout.nodes.length === 0) return
+    if (!canAutoFit()) return
+    const viewport = viewportRef.current
+    if (viewport === null) return
+    const available = viewport.clientWidth - 2
+    if (available <= 0) return
+    const fit = Math.max(ZOOM_MIN, Math.min(1, available / layout.size.width))
+    // 下限就是 ZOOM_MIN（30%）：再小文字就看不清了，宁可让用户横向滚一下，
+    // 也不要把整棵树压成一片看不清的灰块（"不退化"指的是不退化成列表，不是不让人读字）。
+    if (Math.abs(fit - readViewState().zoom) > 0.001) {
+      // 自动适配**不算**用户手动调过（`byUser` 默认 false），所以下一次内容变化仍可重算。
+      setViewZoom(Math.round(fit * 100) / 100)
+      setZoom(Math.round(fit * 100) / 100)
+    }
+  }, [layout.nodes.length, layout.size.width])
+
+  /**
+   * 卸载前把画布/页面的滚动位置记下来。
+   *
+   * 为什么必须记：官方 shell 切到别的面板会**卸载**本页（F-6 实测确认），
+   * 重挂后浏览器把滚动位置归零——只记不还原的话，用户切回来会发现"回到最上面"。
+   */
+  useLayoutEffect(
+    () => () => {
+      captureScroll(viewportRef.current, pageRef.current)
+    },
+    [],
+  )
+
+  /**
+   * 画布有内容之后，把上次的滚动位置**贴回去**。
+   *
+   * 为什么依赖 `layout.nodes.length` 而不是"挂载时贴一次"：挂载那一刻数据还没回来
+   * （`adopt` 是异步的），画布的 `scrollHeight` 还是 0，这时贴 `scrollTop = 300` 会被夹成 0。
+   * 必须等框真的排出来再贴（F-6 实测：先是"贴了没用"，就是踩了这个）。
+   */
+  const didRestoreScroll = useRef(false)
+  useLayoutEffect(() => {
+    if (didRestoreScroll.current || layout.nodes.length === 0) return
+    didRestoreScroll.current = true
+    restoreScroll(viewportRef.current, pageRef.current)
+  }, [layout.nodes.length])
 
   /** `Ctrl+滚轮` 缩放（普通滚轮留给画布滚动，不抢用户的滚动手势）。 */
   const onWheel = useCallback(
@@ -249,7 +299,7 @@ export function BranchPanelPage({ sessionId = null }: BranchPanelProps = {}): Re
   )
 
   return (
-    <div className={cls.page} data-dsh-branch-view="" data-dsh-plugin="branch-conversation">
+    <div className={cls.page} ref={pageRef} data-dsh-branch-view="" data-dsh-plugin="branch-conversation">
       <header className={cls.header}>
         <h2 className={cls.title}>分支对话</h2>
         <p className={cls.subtitle}>
