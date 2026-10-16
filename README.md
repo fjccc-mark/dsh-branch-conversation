@@ -54,7 +54,7 @@ DeepSeek Harness（DSH）插件：在官方侧边栏中新增一个**「分支�
   见下方"**M6 完成**"。
 - **节点交互**：点击节点切换会话（官方 `uiWorkspace.openSession`）；节点上「＋」就地建子会话；
   「▾/▸」折叠（新增 `/branch/set-collapsed`，状态持久化）；文件节点点击走 `/branch/open-file` → 系统默认程序。
-- 布局冒烟（真实加载客户端产物）：M6 后为 **15/15**（坐标/边/端点/重叠/折叠重排）。
+- 布局冒烟（真实加载客户端产物）：M6 + 主轴补做后为 **20/20**（坐标/边/端点/重叠/折叠重排 + 主轴串接 5 条）。
 
 **M4 完成**（本次）
 
@@ -104,10 +104,10 @@ DeepSeek Harness（DSH）插件：在官方侧边栏中新增一个**「分支�
 - **布局纯函数**：`layoutTree` 输出 `{ nodes(矩形) , edges(端点+path+axis) , size, hiddenTotal, hasOrphans }`；
   算法是经典紧凑树（叶子按序占槽位、父节点居中于首末子节点）→ 子树占连续槽段、天然不重叠。
 - **防退化**：`layout-check` 断言"画布内不得再出现 `│├└─` 轨道字符"（`railChars === 0`），谁把形态退回缩进列表就会红。
-- **几何证据（本轮已跑）**：`npm run smoke` **82/82**，其中画布布局套件 **15/15** 断言"边数 = 可见父子关系数 /
+- **几何证据（本轮已跑）**：`npm run smoke` **87/87**，其中画布布局套件 **20/20** 断言"主轴向下 / 分支向右 / 端点贴框 / 框零重叠 / 折叠连带隐藏 /
   端点贴框 / 框零重叠 / `axis` 分类 / 折叠后重排 / 12 层深链不截断"；`npm run layout-shots`
   在真实无头 Edge 上 **88/88 通过**（五档 × 展开/折叠两态）+ 10 张两态截图，目视确认"框 + 连线"成立。
-- 冒烟增至 **82 项**（客户端产物套件 +1：初始态不画空画布；布局套件整体重写成 15 项坐标/边/端点断言）。
+- 冒烟增至 **87 项**（客户端产物套件 +1：初始态不画空画布；布局套件整体重写成 15 项坐标/边/端点断言，后又加 5 条主轴串接用例）。
 - 验收口径：`F-3`/`F-4`/`F-8`（见 [docs/分支对话插件·测试计划.md](docs/分支对话插件·测试计划.md) §0.5），
   落地记录见 [设计文档 §6.7.6](docs/分支对话插件·设计文档.md) 与 [完善计划 §5.5.5](docs/分支对话插件·完善计划.md)。
 
@@ -159,7 +159,7 @@ dsh --profile branch-dev
 npm install --legacy-peer-deps         # 官方 SDK 的 peer 声明在 npm 下需要这个开关
 npm run typecheck                      # host + client 两个 program
 npm run build                          # tsdown（host ESM + client CJS）+ 套加载器外壳 + 内嵌 panel.css
-npm run smoke                          # 六套冒烟（82 项）：M0 14 + M1 14 + M4 15 + 产物 11 + 画布布局 15 + 导出 13
+npm run smoke                          # 六套冒烟（87 项）：M0 14 + M1 14 + M4 15 + 产物 11 + 画布布局 20 + 导出 13
 npm run layout-check                   # 画布形态量测：无头 Chromium 实量五档布局宽 × 展开/折叠两态（88 项）
 npm run layout-shots                   # 同上 + 两态共 10 张验收截图到 artifacts/panel-preview/（截图走 CDP）
 npm run preview                        # 打开早期静态预览页（排版目视；正式量测用 layout-check）

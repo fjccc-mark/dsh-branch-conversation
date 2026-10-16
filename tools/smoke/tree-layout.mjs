@@ -1,19 +1,15 @@
 /**
- * M6 冒烟：Visio 式「节点框 + 连线」画布布局（tree-layout 纯函数）。
+ * 画布布局的冒烟（`tree-layout`）：坐标 / 边 / 端点 / 互斥 / 折叠 / **主轴**。
+ *
+ * 形态口径（M6 + 主轴补做，见 `docs/进度快照.md` §4.3/§4.4）：
+ *   - **主轴**（同一会话的相邻轮次）画成**同一列的竖直链**（向下叠），是"轴线"的本义（B10）；
+ *   - **分支**（跨会话：子对话 / 文件节点）从父框**向右**长出一列。
+ *
+ * 真机数据的事实：同一个会话的多个轮次在树文档里往往是**各自独立的根**（`children` 全空），
+ * 所以主轴链接是**显示层合成的**（`synthetic: true`），不写树文档、不影响导出。
  *
  * 客户端产物是给浏览器模块表用的（`window.__ModuleLoader__.load(...)`），因此这里先装一个
  * 最小的 `window` + 模块表，再取工厂的导出——与真机加载路径一致。
- *
- * 口径已从「缩进列表 + `│├└─` 轨道字符」换成**二维几何**，所以断言也从「轨道前缀」换成
- * 「坐标公式 / 边 / 端点 / 矩形互斥 / 画布尺寸」：
- *   - `x` 只由 depth 决定（同一深度的框必须排在同一列 → 视觉上「同级成行」）；
- *   - `y` 由槽位决定（叶子依次占槽、内部节点居中在子树跨度上）；
- *   - 折叠是**图形行为**：后代连同通往它们的连线一起消失，剩下的节点必须重新排布；
- *   - 深树不再靠截断/省略去挤窄屏，而是靠画布双向滚动 + 缩放（F-5 → M6 的口径变更）。
- *
- * 覆盖：导出与常量契约、空树、hasOrphans、二维坐标、父节点居中、边数=可见父子关系数、
- * 端点贴框与正交折线、axis 分类、矩形互斥、折叠（F-4）、文件节点、孤儿/当前节点、
- * 损坏数据（悬空子节点 / 环）、多根（升根后的树）、深链不破版。
  *
  * 用法：node tools/smoke/tree-layout.mjs
  */
@@ -42,8 +38,10 @@ const jsx = { jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({
 const reactStub = {
   useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}],
   useEffect: () => {},
+  useLayoutEffect: () => {},
   useCallback: (fn) => fn,
   useMemo: (fn) => fn(),
+  useRef: (initial) => ({ current: initial ?? null }),
 }
 const table = new Map([
   ['react', reactStub],
@@ -54,15 +52,13 @@ const exports = definition.factory(
 )
 const { layoutTree, isSessionNode } = exports
 
-// 几何常量：契约里五个都是 `export const`，但**客户端产物目前只把 NODE_W / NODE_H 放进公开面**
-// （`src/client/index.ts` 的再导出列表里没有 LEVEL_GAP / ROW_GAP / PADDING），
-// 所以产物确实导出的两个直接取来校验，其余三个在这里按契约值落成本地常量。
-// 若哪天入口把三个常量也补上再导出，把这三行换成 `exports.XXX` 即可（已写进报告）。
+// 几何常量：客户端入口会把这五个都再导出（`src/client/index.ts`），这里全部从产物取，
+// 保证"契约值"与"实现值"不会各说各话。
 const NODE_W = exports.NODE_W
 const NODE_H = exports.NODE_H
-const LEVEL_GAP = 56
-const ROW_GAP = 18
-const PADDING = 24
+const LEVEL_GAP = exports.LEVEL_GAP
+const ROW_GAP = exports.ROW_GAP
+const PADDING = exports.PADDING
 
 const results = []
 const track = (name, fn) =>
@@ -108,12 +104,9 @@ const boxOf = (layout, id) => {
   return box
 }
 
-/** 浮点比较。像素是 `num()` rounds 到 2 位小数的产物，所以留 0.01 的容差。 */
+/** 浮点比较。像素是 2 位小数的产物，所以留 0.01 的容差。 */
 const approx = (actual, expected, message) => {
-  assert.ok(
-    Math.abs(actual - expected) <= 0.01,
-    `${message}：期望 ${expected}，实际 ${actual}`,
-  )
+  assert.ok(Math.abs(actual - expected) <= 0.01, `${message}：期望 ${expected}，实际 ${actual}`)
 }
 
 /** 两个框的矩形是否相交（边贴边不算相交）。 */
@@ -134,22 +127,39 @@ const assertNoOverlap = (layout, label) => {
   }
 }
 
-// 坐标公式（与 src/client/tree-layout.ts 的契约一致）。
-// 注意 minSlot 恒为 0：第一个落位的叶子总是拿槽位 0，内部节点取子树中点也不会低于它，
-// 所以 y 可以直接写成 PADDING + slot × (NODE_H + ROW_GAP)，不必再减 minSlot。
-const stride = NODE_H + ROW_GAP
-const xOf = (depth) => PADDING + depth * (NODE_W + LEVEL_GAP)
-const yOf = (slot) => PADDING + slot * stride
-const widthOf = (maxDepth) => 2 * PADDING + (maxDepth + 1) * NODE_W + maxDepth * LEVEL_GAP
-const heightOf = (slotCount) => 2 * PADDING + slotCount * stride - ROW_GAP
+/**
+ * 坐标契约：**分支向右、主轴向下**。
+ *   - 分支每深一层往右一整列：`x = PADDING + 分支层数 × (NODE_W + LEVEL_GAP)`；
+ *   - 主轴（同一会话的相邻轮次）同列向下叠，`y` 每轮 + `NODE_H + ROW_GAP`。
+ */
+const xOf = (branchDepth) => PADDING + branchDepth * (NODE_W + LEVEL_GAP)
+const rowStride = NODE_H + ROW_GAP
 
-track('导出可用：layoutTree / isSessionNode 是函数，框尺寸常量符合契约', () => {
+/** 断言"下一轮正好在上一轮的下一行"（主轴的节奏）。 */
+const assertNextRow = (upper, lower) => {
+  approx(lower.x, upper.x, `${upper.id}→${lower.id} 主轴必须同列`)
+  approx(lower.y, upper.y + rowStride, `${upper.id}→${lower.id} 应该正好下移一行（框高 + 行距）`)
+}
+
+/** 边的键（便于比对集合）。 */
+const edgeKeys = (layout) => layout.edges.map((edge) => `${edge.from}->${edge.to}`)
+
+/**
+ * 造一棵树视图，并给每个节点一个**独立会话**（默认行为），
+ * 这样主轴合成不会把它们串起来——需要主轴时请显式传同一个 `sessionId`。
+ */
+const branchView = (nodes, currentNodeId = null) => view(nodes, currentNodeId)
+
+track('导出可用：layoutTree / isSessionNode 是函数，五个几何常量都从产物导出且数值符合契约', () => {
   assert.equal(typeof layoutTree, 'function', 'layoutTree 不是函数')
   assert.equal(typeof isSessionNode, 'function', 'isSessionNode 不是函数')
-  // 常量是对外契约的一部分（页面用它算滚动范围、预览工具用它批量量测），
-  // 所以在这里钉死数值：后面所有坐标断言都建立在这组常量上。
-  assert.equal(NODE_W, 208, '产物导出的 NODE_W 应为 208')
-  assert.equal(NODE_H, 62, '产物导出的 NODE_H 应为 62')
+  // 这五个常量是对外契约的一部分（页面算滚动范围、预览工具与量测脚本都要用），
+  // 所以钉死数值 + 钉死"确实导出了"，后面所有坐标断言都建立在这组常量上。
+  assert.equal(NODE_W, 208, 'NODE_W 应为 208')
+  assert.equal(NODE_H, 62, 'NODE_H 应为 62')
+  assert.equal(LEVEL_GAP, 56, 'LEVEL_GAP 应为 56')
+  assert.equal(ROW_GAP, 18, 'ROW_GAP 应为 18')
+  assert.equal(PADDING, 24, 'PADDING 应为 24')
 })
 
 track('空树 / null：空 nodes + 空 edges + 48×48 画布，不崩', () => {
@@ -162,11 +172,7 @@ track('空树 / null：空 nodes + 空 edges + 48×48 画布，不崩', () => {
 
 track('hasOrphans：无孤儿 false、有孤儿 true（含被折叠隐藏的孤儿）', () => {
   assert.equal(layoutTree(view([node('n1', { turn: 1 })])).hasOrphans, false, '没有孤儿时不该提示')
-  assert.equal(
-    layoutTree(view([node('n1', { turn: 1, orphan: true })])).hasOrphans,
-    true,
-    '有一个孤儿就要提示',
-  )
+  assert.equal(layoutTree(view([node('n1', { turn: 1, orphan: true })])).hasOrphans, true, '有一个孤儿就要提示')
   assert.equal(
     layoutTree(view([node('n1', { turn: 1 }), node('n2', { turn: 2, orphan: true })])).hasOrphans,
     true,
@@ -181,92 +187,181 @@ track('hasOrphans：无孤儿 false、有孤儿 true（含被折叠隐藏的孤�
   assert.equal(hidden.hasOrphans, true, '被折叠隐藏的孤儿也必须让入口出现')
 })
 
-track('二维坐标：x 只由 depth 决定（同级成行），y 随槽位递增', () => {
-  // (a) 一条链 n1→n2→n3：x 每层按 NODE_W + LEVEL_GAP 步进；链上每层只有一个子节点，
-  //     整条链共享同一个叶子槽位，所以三者的 y 必须完全相同（同一条水平轴线上）。
+track('分支向右：每深一层往右一整列；同一父节点的多个分支同列上下叠', () => {
+  // (a) 三条**跨会话**的分支链 n1→n2→n3：每层换一个 sessionId，所以它们是分支而不是主轴。
   const chain = layoutTree(
-    view([
-      node('n1', { turn: 1, children: ['n2'] }),
-      node('n2', { turn: 2, children: ['n3'] }),
-      node('n3', { turn: 3 }),
+    branchView([
+      node('n1', { sessionId: 'A', turn: 1, children: ['n2'] }),
+      node('n2', { sessionId: 'B', turn: 1, children: ['n3'] }),
+      node('n3', { sessionId: 'C', turn: 1 }),
     ]),
   )
   assert.equal(chain.nodes.length, 3, '链应排出 3 个框')
   for (const [depth, id] of ['n1', 'n2', 'n3'].entries()) {
     const box = boxOf(chain, id)
-    assert.equal(box.depth, depth, `${id} 的深度应为 ${depth}`)
-    approx(box.x, xOf(depth), `${id} 的 x 应等于 PADDING + depth×(NODE_W+LEVEL_GAP)`)
-    approx(box.y, yOf(0), `${id} 与整条链共用一个槽位，y 应停在首行`)
+    assert.equal(box.depth, depth, `${id} 的分支深度应为 ${depth}`)
+    approx(box.x, xOf(depth), `${id} 的 x 应等于 PADDING + 分支深度×(NODE_W+LEVEL_GAP)`)
   }
-  assert.equal(chain.size.width, widthOf(2), '链的 size.width 应按最深 depth=2 计算')
+  assertNoOverlap(chain, '分支链')
 
-  // (b) 一个分叉 n1→[n2, n3]：两个子节点同 depth → x 必须严格相同（"同级成行"），
-  //     而且父框必须夹在两个子框之间（y 随槽位递增）。
+  // (b) 一个父节点下的多个**分支**子节点：都从父框右侧同一列起算，上下叠（不互相往右推）。
+  //     分支排在**父框下方**（不是与父框居中）——这样父框不会压到自己的分支、
+  //     分支之间也不会互相压（"分支靠下的这块纵向空间"是这套布局的代价，换来的是不重叠 + 不往右爆宽）。
   const fork = layoutTree(
-    view([node('n1', { turn: 1, children: ['n2', 'n3'] }), node('n2', { turn: 2 }), node('n3', { turn: 3 })]),
+    branchView([
+      node('n1', { sessionId: 'A', turn: 1, children: ['n2', 'n3'] }),
+      node('n2', { sessionId: 'B', turn: 1 }),
+      node('n3', { sessionId: 'C', turn: 1 }),
+    ]),
   )
-  const root = boxOf(fork, 'n1')
+  const parent = boxOf(fork, 'n1')
   const left = boxOf(fork, 'n2')
   const right = boxOf(fork, 'n3')
-  assert.equal(left.depth, 1, 'n2 的深度应为 1')
-  assert.equal(right.depth, 1, 'n3 的深度应为 1')
-  approx(left.x, xOf(1), '第一列的 x 应等于 PADDING + (NODE_W+LEVEL_GAP)')
-  assert.equal(left.x, right.x, '同一深度的节点必须 x 相同（同级成行）')
-  approx(left.y, yOf(0), '第一个子节点占首个槽位')
-  approx(right.y, yOf(1), '第二个子节点占下一个槽位')
-  approx(root.y, yOf(0.5), '父节点居中于两个子节点之间')
-  assert.ok(left.y < root.y && root.y < right.y, 'y 必须随槽位递增（左上的子节点更高）')
+  assert.equal(left.depth, 1, 'n2 的分支深度应为 1')
+  assert.equal(right.depth, 1, 'n3 的分支深度应为 1')
+  approx(left.x, xOf(1), '第一层分支的 x 应等于 PADDING + (NODE_W+LEVEL_GAP)')
+  assert.equal(left.x, right.x, '同一层的分支必须 x 相同（同列上下叠，而不是往右推）')
+  assert.ok(left.y >= parent.y + parent.height, `分支应排在父框下方：parent.bottom=${parent.y + parent.height} left.y=${left.y}`)
+  assert.ok(right.y >= left.y + left.height, `两个分支不能重叠：left.bottom=${left.y + left.height} right.y=${right.y}`)
+  assertNoOverlap(fork, '同层两分支')
 })
 
-track('父节点居中：父框 y = 其首末子节点 y 的中点', () => {
-  // (a) 子节点都是叶子：跨度就是叶子本身，于是父 y 恰好等于「首个子节点 y + 末个子节点 y」÷ 2。
-  const fork = layoutTree(
-    view([
-      node('n1', { turn: 1, children: ['n2', 'n3', 'n4'] }),
-      node('n2', { turn: 2 }),
-      node('n3', { turn: 3 }),
-      node('n4', { turn: 4 }),
-    ]),
-  )
-  const root = boxOf(fork, 'n1')
-  const kids = ['n2', 'n3', 'n4'].map((id) => boxOf(fork, id))
-  approx(root.y, (kids[0].y + kids[2].y) / 2, '父框应居中于首末子节点')
-  approx(kids[1].y, root.y, '奇数个子节点时，中间那个子节点与父框同一行')
-
-  // (b) 子节点本身是子树时，"首末子节点"指的是**子树跨度的首末叶子**（不是两个子框本身）。
-  //     这里故意做成不对称：n2 跨两个槽位、n3 只跨一个。
-  const deep = layoutTree(
-    view([
-      node('n1', { turn: 1, children: ['n2', 'n3'] }),
-      node('n2', { turn: 2, children: ['n4', 'n5'] }),
-      node('n3', { turn: 3, children: ['n6'] }),
-      node('n4', { turn: 4 }),
-      node('n5', { turn: 5 }),
-      node('n6', { turn: 6 }),
-    ]),
-  )
-  const deepRoot = boxOf(deep, 'n1')
-  const left = boxOf(deep, 'n2')
-  const right = boxOf(deep, 'n3')
-  assert.ok(left.y < right.y, 'n2 的子树在上、n3 的子树在下')
-  approx(left.y, (boxOf(deep, 'n4').y + boxOf(deep, 'n5').y) / 2, 'n2 居中于自己的两个子节点')
-  approx(right.y, boxOf(deep, 'n6').y, 'n3 只有一个子节点，必须与它同一行')
-  // 父框居中于整条子树的跨度：最上叶子 n4 与最下叶子 n6 的中点。
-  approx(deepRoot.y, (boxOf(deep, 'n4').y + boxOf(deep, 'n6').y) / 2, '父框居中于子树跨度的首末叶子')
-  // 反证：若按「两个子框 y 的算术平均」算，deepRoot.y 会是 (n2.y + n3.y)/2 ——
-  // 但 n2 自己跨了两个槽位，必须按跨度算才不会让子树互相压叠。
-  assert.notEqual(
-    deepRoot.y,
-    (left.y + right.y) / 2,
-    '父节点居中用的是子树跨度，不是两个子框 y 的算术平均',
-  )
-})
-
-track('边数 = 可见父子关系数：from/to 集合与可见父子对完全一致', () => {
-  // n5 被折叠（它下面还有 n6）→ 只应画出 4 条边；期望值手写在下面，
-  // 不拿同一套规则再算一遍，避免"用被测逻辑验证被测逻辑"。
+track('主轴向下：同会话连续轮次同列依次下移，整条只占一列宽（真机数据形状）', () => {
+  // 这是真机上的形状：一个会话的轮次**各自为根**（`children` 全空），靠显示层合成主轴。
+  // 合成出来的链条每一步都"停留"在父节点的列上（不往右），所以画布只占一列。
   const layout = layoutTree(
     view([
+      node('n-1', { sessionId: 'S', turn: 1 }),
+      node('n-2', { sessionId: 'S', turn: 2 }),
+      node('n-3', { sessionId: 'S', turn: 3 }),
+      node('n-4', { sessionId: 'S', turn: 4 }),
+    ]),
+  )
+  const boxes = ['n-1', 'n-2', 'n-3', 'n-4'].map((id) => boxOf(layout, id))
+  assert.equal(new Set(boxes.map((box) => box.x)).size, 1, `主轴四轮必须同列，实际 x=${boxes.map((b) => b.x).join(',')}`)
+  for (let index = 1; index < boxes.length; index += 1) assertNextRow(boxes[index - 1], boxes[index])
+  approx(layout.size.width, 2 * PADDING + NODE_W, '主轴只占一列，画布宽 = 框宽 + 两侧内边距')
+  assertNoOverlap(layout, '主轴四轮')
+})
+
+track('主轴：同一会话各自为根的轮次也会被串起来（真机数据形状）', () => {
+  // 真机上"一个会话的多个轮次"经常是**四个互不相干的根**（`children` 全空）。
+  // 若不合成主轴，画布上就是 4 个孤立框、0 条线——这条用例把那件事钉死。
+  const layout = layoutTree(
+    view([
+      node('n-1', { sessionId: 'S', turn: 1 }),
+      node('n-2', { sessionId: 'S', turn: 2 }),
+      node('n-3', { sessionId: 'S', turn: 3 }),
+      node('n-4', { sessionId: 'S', turn: 4 }),
+    ]),
+  )
+  assert.deepEqual(
+    edgeKeys(layout).sort(),
+    ['n-1->n-2', 'n-2->n-3', 'n-3->n-4'],
+    '四个同级根应按轮次串成一条主轴',
+  )
+  assert.ok(layout.edges.every((edge) => edge.synthetic === true), '这些都是显示层合成的边')
+  assert.ok(layout.edges.every((edge) => edge.axis === 'main'), '合成的主轴边 axis 必须是 main（实线）')
+  const boxes = ['n-1', 'n-2', 'n-3', 'n-4'].map((id) => boxOf(layout, id))
+  for (let index = 1; index < boxes.length; index += 1) assertNextRow(boxes[index - 1], boxes[index])
+  approx(layout.size.width, 2 * PADDING + NODE_W, '整条主轴只占一列')
+  assertNoOverlap(layout, '各自为根的主轴')
+})
+
+track('主轴：折叠中间一轮会连带隐藏它的下游轮次（链是不间断的）', () => {
+  /** 真机形状：同会话的连续轮次各自为根（靠合成主轴串起来）。 */
+  const build = (collapsedTurn) =>
+    layoutTree(
+      view([
+        node('n-1', { sessionId: 'S', turn: 1 }),
+        node('n-2', { sessionId: 'S', turn: 2, collapsed: collapsedTurn === 2 }),
+        node('n-3', { sessionId: 'S', turn: 3 }),
+        node('n-4', { sessionId: 'S', turn: 4 }),
+      ]),
+    )
+
+  const expanded = build(null)
+  assert.equal(expanded.nodes.length, 4, '展开时四个框都在')
+  assert.equal(expanded.hiddenTotal, 0, '展开时没有隐藏节点')
+  assert.deepEqual(edgeKeys(expanded).sort(), ['n-1->n-2', 'n-2->n-3', 'n-3->n-4'], '展开时是完整的主轴链')
+
+  const collapsed = build(2)
+  assert.deepEqual(
+    collapsed.nodes.map((box) => box.id).sort(),
+    ['n-1', 'n-2'],
+    '折叠第 2 轮后，第 3、4 轮（它的下游）都应消失——不能变成兄弟"越级上前"',
+  )
+  assert.equal(collapsed.hiddenTotal, 2, '被连带隐藏的下游轮次要计入 hiddenTotal（n-3、n-4）')
+  assert.deepEqual(edgeKeys(collapsed), ['n-1->n-2'], '链断在折叠处，后面不该再有线')
+  assert.ok(
+    !collapsed.edges.some((edge) => edge.to === 'n-3' || edge.from === 'n-3'),
+    '通往被隐藏轮次的线也必须一起消失',
+  )
+  assertNoOverlap(collapsed, '折叠主轴')
+})
+
+track('主轴只串同一会话：跨会话的兄弟各自挂在真父节点上（画成虚线分支）', () => {
+  const layout = layoutTree(
+    view([
+      node('r', { sessionId: 'main', turn: 0, children: ['n1', 'b1', 'f1'] }),
+      node('n1', { sessionId: 'main', turn: 1 }),
+      // 子对话：轮次也是 1，但 sessionId 不同 → 绝不并进主轴。
+      node('b1', { sessionId: 'child', turn: 1 }),
+      node('f1', { sessionId: 'file', kind: 'file', file: { path: 'D:/a.txt', missing: false } }),
+    ]),
+  )
+  const axisOf = (to) => layout.edges.find((edge) => edge.to === to)?.axis
+  assert.equal(axisOf('n1'), 'main', '同会话的轮次是主轴')
+  assert.equal(axisOf('b1'), 'branch', '跨会话的子对话是分支（虚线）')
+  assert.equal(axisOf('f1'), 'branch', '文件节点是分支（虚线）')
+  // 无轮次的兄弟（文件 / 待提问的分支）不能被当成"连续的轮次"接进主轴。
+  assert.ok(
+    layout.edges.every((edge) => edge.synthetic !== true),
+    '这里没有任何主轴合成——n1 与 r 是真父子，b1/f1 是分支',
+  )
+  assertNoOverlap(layout, '主轴 + 分支')
+})
+
+track('主轴：轮次不连续时不串（第 1、3 轮之间不硬接一条线）', () => {
+  const layout = layoutTree(
+    view([
+      node('r', { sessionId: 'main', turn: 0, children: ['n1', 'n3'] }),
+      node('n1', { sessionId: 'main', turn: 1 }),
+      // 第 2 轮不在树上（例如没被 adopt 进来）：此时 3 不该被"接"到 1 后面。
+      node('n3', { sessionId: 'main', turn: 3 }),
+    ]),
+  )
+  assert.deepEqual(edgeKeys(layout).sort(), ['r->n1', 'r->n3'], '轮次不连续就各自挂真父节点，别凭空接一条主轴')
+  assert.ok(layout.edges.every((edge) => edge.synthetic !== true), '不该有合成的边')
+})
+
+track('主轴：真父子关系优先于主轴合成（同会话 + 轮次连续的**真孩子**不被改挂）', () => {
+  // 反例来自真实夹具：子对话里的 `第1轮 → 第2轮` 既是**真父子**（children 里有），
+  // 又满足"同会话 + 轮次连续"。此时必须保持真层级，不能因为主轴规则把它改挂/标成合成边。
+  const layout = layoutTree(
+    view([
+      node('r', { sessionId: 'main', turn: 0, children: ['n1'] }),
+      node('n1', { sessionId: 'main', turn: 1, children: ['b1'] }),
+      node('b1', { sessionId: 'child', turn: 1, children: ['b2'] }),
+      node('b2', { sessionId: 'child', turn: 2 }),
+    ]),
+  )
+  const edge = layout.edges.find((item) => item.from === 'b1' && item.to === 'b2')
+  assert.ok(edge !== undefined, '真父子 b1->b2 必须存在')
+  assert.notEqual(edge.synthetic, true, '真父子关系不能被标成"合成的主轴"')
+  // 真层级必须保留：r(0) → n1(1) → b1(2) → b2(3)，b2 不能被压平成 b1 的兄弟。
+  assert.equal(boxOf(layout, 'b1').depth, 2)
+  assert.equal(boxOf(layout, 'b2').depth, 3, '真层级要保留：b2 比 b1 深一层')
+  assert.equal(edge.axis, 'main', 'b1→b2 同会话，应是实线主轴')
+  assert.equal(layout.edges.find((item) => item.to === 'b1')?.axis, 'branch', 'n1→b1 跨会话，应是虚线分支')
+})
+
+track('边数 = 可见父子关系数 + 主轴合成数：from/to 集合与期望完全一致', () => {
+  // n5 被折叠（它下面还有 n6）→ 只应画出 4 条边；期望值手写在下面，
+  // 不拿同一套规则再算一遍，避免"用被测逻辑验证被测逻辑"。
+  // 注意：这里每个节点都是独立会话，所以**没有任何主轴合成**，边数就是可见父子关系数。
+  const layout = layoutTree(
+    branchView([
       node('n1', { turn: 1, children: ['n2', 'n3'] }),
       node('n2', { turn: 2 }),
       node('n3', { turn: 3, children: ['n4', 'n5'] }),
@@ -276,7 +371,7 @@ track('边数 = 可见父子关系数：from/to 集合与可见父子对完全�
     ]),
   )
   const expected = ['n1->n2', 'n1->n3', 'n3->n4', 'n3->n5']
-  assert.deepEqual(layout.edges.map((edge) => `${edge.from}->${edge.to}`).sort(), expected, '边的 from/to 集合不对')
+  assert.deepEqual(edgeKeys(layout).sort(), expected, '边的 from/to 集合不对')
   assert.equal(layout.edges.length, expected.length, '边数 = 可见父子关系数')
   assert.equal(layout.nodes.length, 5, '可见框应为 5 个')
   assert.equal(layout.hiddenTotal, 1, '折叠 n5 隐藏了 n6 一个节点')
@@ -286,48 +381,51 @@ track('边数 = 可见父子关系数：from/to 集合与可见父子对完全�
   )
 })
 
-track('边端点贴框：起点=父框右缘中点、终点=子框左缘中点，path 端点必须一致', () => {
-  // 三叉 + 深一层的结构，保证同时覆盖"一个父节点多条边（车道错开）"和"多层边"。
+track('边端点贴框：分支贴父右缘中点/子左缘中点；主轴贴父下缘中点/子上缘中点', () => {
   const layout = layoutTree(
-    view([
-      node('n1', { turn: 1, children: ['n2', 'n3', 'n4'] }),
-      node('n2', { turn: 2, children: ['n5', 'n6'] }),
+    branchView([
+      node('n1', { turn: 1, children: ['n2', 'n3'] }),
+      node('n2', { turn: 2, children: ['n4'] }),
       node('n3', { turn: 3 }),
       node('n4', { turn: 4 }),
-      node('n5', { turn: 5 }),
-      node('n6', { turn: 6 }),
     ]),
   )
-  assert.equal(layout.edges.length, 5, '6 个框、无折叠 → 5 组可见父子关系')
+  assert.ok(layout.edges.length >= 3, '至少三条边')
   for (const edge of layout.edges) {
-    const parent = boxOf(layout, edge.from)
-    const child = boxOf(layout, edge.to)
+    const from = boxOf(layout, edge.from)
+    const to = boxOf(layout, edge.to)
     const label = `边 ${edge.from}->${edge.to}`
-    approx(edge.x1, parent.x + NODE_W, `${label} 起点 x 应贴在父框右缘`)
-    approx(edge.y1, parent.y + NODE_H / 2, `${label} 起点 y 应贴在父框右缘中点`)
-    approx(edge.x2, child.x, `${label} 终点 x 应贴在子框左缘`)
-    approx(edge.y2, child.y + NODE_H / 2, `${label} 终点 y 应贴在子框左缘中点`)
-
-    // path 是正交折线：M 父右缘中点 → 竖线（车道）→ L 子左缘中点，共 4 个点。
-    // 断言端点数值而不只是字符串前缀，才能挡住"改了端点忘了改 path"的半吊子改动。
     assert.ok(edge.path.startsWith('M '), `${label} 的 path 应以 M 开头：${edge.path}`)
+    const sameColumn = Math.abs(to.x - from.x) < 0.01
+    if (sameColumn) {
+      // 主轴：竖线，端点贴父框下缘中点与子框上缘中点。
+      approx(edge.x1, from.x + NODE_W / 2, `${label} 主轴起点 x 应是父框下缘中点`)
+      approx(edge.y1, from.y + NODE_H, `${label} 主轴起点 y 应是父框下缘`)
+      approx(edge.x2, to.x + NODE_W / 2, `${label} 主轴终点 x 应是子框上缘中点`)
+      approx(edge.y2, to.y, `${label} 主轴终点 y 应是子框上缘`)
+      assert.equal(edge.path.split(' L ').length, 2, `${label} 主轴应是一条直线段：${edge.path}`)
+    } else {
+      // 分支：折线，端点贴父框右缘中点与子框左缘中点。
+      approx(edge.x1, from.x + NODE_W, `${label} 分支起点 x 应贴在父框右缘`)
+      approx(edge.y1, from.y + NODE_H / 2, `${label} 分支起点 y 应贴在父框右缘中点`)
+      approx(edge.x2, to.x, `${label} 分支终点 x 应贴在子框左缘`)
+      approx(edge.y2, to.y + NODE_H / 2, `${label} 分支终点 y 应贴在子框左缘中点`)
+      assert.equal(edge.path.split(' L ').length, 4, `${label} 分支应是 4 点正交折线：${edge.path}`)
+    }
+    // path 的端点数值必须与 x1/y1/x2/y2 一致（挡住"改了端点忘了改 path"）。
     const segments = edge.path.split(' L ')
-    assert.equal(segments.length, 4, `${label} 的 path 应是 4 点正交折线：${edge.path}`)
     const [mx, my] = segments[0].replace(/^M /, '').split(' ')
     approx(Number(mx), edge.x1, `${label} 的 path 起点 x`)
     approx(Number(my), edge.y1, `${label} 的 path 起点 y`)
     const [lx, ly] = segments.at(-1).split(' ')
     approx(Number(lx), edge.x2, `${label} 的 path 终点 x`)
     approx(Number(ly), edge.y2, `${label} 的 path 终点 y`)
-    assert.ok(edge.path.endsWith(`${lx} ${ly}`), `${label} 的 path 应以 "L x2 y2" 结尾：${edge.path}`)
   }
 })
 
-track('axis 分类：同会话 = main，跨会话（子对话 / 文件节点）= branch', () => {
-  // 同一会话的相邻轮次串成轴线（main）；在某节点上开出的子对话、以及挂在节点下的文件
-  // 都属于"另一条线"（branch）——页面用不同线型画，所以分类必须准确。
+track('axis 分类：同会话 = main（实线），跨会话（子对话 / 文件节点）= branch（虚线）', () => {
   const layout = layoutTree(
-    view([
+    branchView([
       node('n1', { sessionId: 'main', turn: 1, children: ['n2', 'n3'] }),
       node('n2', { sessionId: 'main', turn: 2, children: ['f1'] }),
       node('n3', { sessionId: 'sub', turn: 1 }),
@@ -340,23 +438,24 @@ track('axis 分类：同会话 = main，跨会话（子对话 / 文件节点）=
   assert.equal(axisOf('n2', 'f1'), 'branch', '文件节点（不同 sessionId）也是分支')
 })
 
-track('框不重叠：任意两框矩形互斥，且每个框都是 NODE_W × NODE_H', () => {
-  // 三叉 + 深链的混合树：只要"叶子占槽 + 父节点居中"实现有偏差，就必然出现压叠。
+track('框不重叠：任意两框矩形互斥，且每个框都是 NODE_W × NODE_H，画布刚好框住它们', () => {
+  // 三叉 + 深链的混合树：只要"分支向下叠、主轴向下串"的实现有偏差，就必然出现压叠。
+  // 这里故意让每个节点各属一个会话（纯分支形态），避免主轴把形状揉在一起。
   const layout = layoutTree(
-    view([
-      node('n1', { turn: 1, children: ['n2', 'n3', 'n4'] }),
-      node('n2', { turn: 2, children: ['n5', 'n6'] }),
-      node('n3', { turn: 3, children: ['n7'] }),
-      node('n4', { turn: 4, children: ['n8', 'n9', 'n10'] }),
-      node('n5', { turn: 5 }),
-      node('n6', { turn: 6, children: ['n11'] }),
-      node('n7', { turn: 7 }),
-      node('n8', { turn: 8 }),
-      node('n9', { turn: 9, children: ['n12', 'n13'] }),
-      node('n10', { turn: 10 }),
-      node('n11', { turn: 11 }),
-      node('n12', { turn: 12 }),
-      node('n13', { turn: 13 }),
+    branchView([
+      node('n1', { sessionId: 'A', turn: 1, children: ['n2', 'n3', 'n4'] }),
+      node('n2', { sessionId: 'B', turn: 2, children: ['n5', 'n6'] }),
+      node('n3', { sessionId: 'C', turn: 3, children: ['n7'] }),
+      node('n4', { sessionId: 'D', turn: 4, children: ['n8', 'n9', 'n10'] }),
+      node('n5', { sessionId: 'E', turn: 5 }),
+      node('n6', { sessionId: 'F', turn: 6, children: ['n11'] }),
+      node('n7', { sessionId: 'G', turn: 7 }),
+      node('n8', { sessionId: 'H', turn: 8 }),
+      node('n9', { sessionId: 'I', turn: 9, children: ['n12', 'n13'] }),
+      node('n10', { sessionId: 'J', turn: 10 }),
+      node('n11', { sessionId: 'K', turn: 11 }),
+      node('n12', { sessionId: 'L', turn: 12 }),
+      node('n13', { sessionId: 'M', turn: 13 }),
     ]),
   )
   assert.equal(layout.nodes.length, 13, '13 个可见框')
@@ -380,28 +479,25 @@ track('框不重叠：任意两框矩形互斥，且每个框都是 NODE_W × NO
 })
 
 track('折叠 = 图形行为（F-4）：后代与连线一起消失、hiddenTotal 计数、剩余节点重新排布', () => {
-  const nodes = (collapsed) => [
-    node('n1', { turn: 1, children: ['n2', 'n3'] }),
-    node('n2', { turn: 2, collapsed, children: ['n4', 'n5'] }),
-    node('n3', { turn: 3, children: ['n6', 'n7'] }),
-    node('n4', { turn: 4 }),
-    node('n5', { turn: 5 }),
-    node('n6', { turn: 6 }),
-    node('n7', { turn: 7 }),
-  ]
-  const before = layoutTree(view(nodes(false)))
-  const after = layoutTree(view(nodes(true)))
+  const nodes = (collapsed) =>
+    branchView([
+      node('n1', { sessionId: 'A', turn: 1, children: ['n2', 'n3'] }),
+      node('n2', { sessionId: 'B', turn: 2, collapsed, children: ['n4', 'n5'] }),
+      node('n3', { sessionId: 'C', turn: 3, children: ['n6', 'n7'] }),
+      node('n4', { sessionId: 'D', turn: 4 }),
+      node('n5', { sessionId: 'E', turn: 5 }),
+      node('n6', { sessionId: 'F', turn: 6 }),
+      node('n7', { sessionId: 'G', turn: 7 }),
+    ])
+  const before = layoutTree(nodes(false))
+  const after = layoutTree(nodes(true))
 
-  // 折叠前：叶子依次是 n4,n5,n6,n7（槽位 0..3）→ n2 居中于 0.5、n3 居中于 2.5、n1 居中于 1.5。
   assert.equal(before.nodes.length, 7, '展开时 7 个框')
   assert.equal(before.edges.length, 6, '展开时 6 条边')
   assert.equal(before.hiddenTotal, 0, '展开时没有隐藏节点')
-  approx(boxOf(before, 'n2').y, yOf(0.5), '展开时 n2 居中于两个子节点')
-  approx(boxOf(before, 'n1').y, yOf(1.5), '展开时 n1 居中于整棵树跨度')
-  approx(boxOf(before, 'n3').y, yOf(2.5), '展开时 n3 居中于两个子节点')
 
   // 折叠后：n2 的后代 n4/n5 既不在 nodes 里，也不在 edges 里；计数要含孙子。
-  assert.deepEqual(after.nodes.map((box) => box.id), ['n1', 'n2', 'n3', 'n6', 'n7'], '折叠后可见框应少两个')
+  assert.deepEqual(after.nodes.map((box) => box.id).sort(), ['n1', 'n2', 'n3', 'n6', 'n7'], '折叠后可见框应少两个')
   assert.equal(after.hiddenTotal, 2, 'hiddenTotal 应等于被隐藏的后代数（n4、n5）')
   assert.equal(boxOf(after, 'n2').collapsed, true, '折叠标记要传到框上')
   assert.equal(boxOf(after, 'n2').hiddenChildren, 2, '框上的计数是直接子节点数')
@@ -413,21 +509,17 @@ track('折叠 = 图形行为（F-4）：后代与连线一起消失、hiddenTota
     )
   }
   assert.ok(after.edges.length < before.edges.length, `折叠后边数必须严格变小：${before.edges.length} → ${after.edges.length}`)
-  assert.equal(after.edges.length, 4, '折叠后只剩 n1→n2、n1→n3、n3→n6、n3→n7')
+  assert.deepEqual(edgeKeys(after).sort(), ['n1->n2', 'n1->n3', 'n3->n6', 'n3->n7'], '折叠后只剩这四条')
 
-  // 重新排布的具体差异：n2 子树原来跨两个槽位（叶子 0..1），折叠后只剩它自己占一个槽位，
-  // 于是 n1 的"首末子跨度"从 0..3 收窄成 0..2，n1 的 y 从 yOf(1.5) 上移到 yOf(1)。
-  approx(boxOf(after, 'n2').y, yOf(0), '折叠后 n2 自己成了一个叶子，落在首个槽位')
-  approx(boxOf(after, 'n1').y, yOf(1), '跨度收窄后 n1 必须重排到 yOf(1)')
-  assert.notEqual(boxOf(after, 'n1').y, boxOf(before, 'n1').y, 'n1 的 y 必须随折叠改变（否则说明布局没重算）')
-  approx(boxOf(after, 'n3').y, yOf(1.5), 'n3 的子树整体上移一个槽位')
-  assert.notEqual(boxOf(after, 'n3').y, boxOf(before, 'n3').y, 'n3 也必须重排')
+  // 重排证据：折叠前 n2 的子树占两行，折叠后只剩它自己一行，于是**后续兄弟整体上移**。
+  assert.notEqual(boxOf(after, 'n3').y, boxOf(before, 'n3').y, 'n3 的 y 必须随折叠改变（否则说明布局没重算）')
+  assert.ok(boxOf(after, 'n3').y < boxOf(before, 'n3').y, 'n2 子树缩短后，n3 应当上移')
   assertNoOverlap(after, '折叠后')
 })
 
 track('文件节点：kind/filePath/fileMissing、turn 为 null、不可跳会话', () => {
   const layout = layoutTree(
-    view([
+    branchView([
       node('n1', { turn: 1, children: ['f1', 'n2'] }),
       node('f1', { kind: 'file', label: '设计文档.md', file: { path: 'D:/docs/设计文档.md', missing: true } }),
       node('n2', { turn: 2 }),
@@ -457,36 +549,38 @@ track('孤儿与当前节点：orphan/current 标记正确传递，孤儿不可�
   assert.equal(isSessionNode(orphan), false, '孤儿节点不可跳转（原会话已被删除）')
 })
 
-track('损坏数据：悬空子节点被忽略；环不死循环且每个节点只出现一次', () => {
+track('损坏数据：悬空子节点被忽略；环与自环不死循环、不重复、不多画边', () => {
   // 悬空 id：服务器删了节点但父节点的 children 还没更新——不能崩，也不能画出一条通向虚空的边。
-  const dangling = layoutTree(
-    view([node('n1', { turn: 1, children: ['missing', 'n2'] }), node('n2', { turn: 2 })]),
-  )
+  const dangling = layoutTree(view([node('n1', { turn: 1, children: ['missing', 'n2'] }), node('n2', { turn: 2 })]))
   assert.deepEqual(dangling.nodes.map((box) => box.id).sort(), ['n1', 'n2'], '悬空子节点 id 必须被忽略')
   assert.equal(dangling.edges.length, 1, '只应剩下 n1→n2 一条边')
 
   // 环：a→b→a。没有任何节点"不被当子节点"，实现会退化成把全部节点当起点；
-  // 关键判据是"每个节点最多出现一次"且不无限递归。
+  // 关键判据是"每个节点最多出现一次、边也不重复"且不无限递归。
   const cyclic = layoutTree(view([node('a', { turn: 1, children: ['b'] }), node('b', { turn: 2, children: ['a'] })]))
   assert.equal(cyclic.nodes.length, 2, `有环时每个节点只应出现一次，实际 ${cyclic.nodes.length}`)
   assert.equal(new Set(cyclic.nodes.map((box) => box.id)).size, 2, '环里的 id 不能重复')
+  // 画出来的线必须与"排布期真正建立的连接"严格相等：环上只应有一条边。
+  assert.equal(cyclic.edges.length, 1, `有环时不应画回边，实际 ${cyclic.edges.length} 条：${edgeKeys(cyclic).join(', ')}`)
   assert.ok(Number.isFinite(cyclic.size.width), '有环时 width 仍应是有限数')
   assert.ok(Number.isFinite(cyclic.size.height), '有环时 height 仍应是有限数')
 
   // 自环：s1→s1。
   const selfLoop = layoutTree(view([node('s1', { turn: 1, children: ['s1'] })]))
   assert.equal(selfLoop.nodes.length, 1, '自环也只能排一次')
+  assert.equal(selfLoop.edges.length, 0, '自环不该画出一条线')
 })
 
-track('多根（升根后的树）：两个根都在 depth 0，占独立槽段、互不重叠', () => {
-  // 父会话被删后子会话升根：两棵子树并列排在同一列，各占自己的槽段。
+track('多根（升根后的树）：每个根都在 depth 0、各自成块、互不重叠', () => {
+  // 父会话被删后子会话升根：两棵树落在同一份文档里，必须各占一块、不能叠在一起。
+  // 两个根属于**不同会话**（默认每节点独立会话），所以不会被主轴串起来。
   const layout = layoutTree(
-    view([
-      node('r1', { turn: 1, children: ['r1a'] }),
-      node('r1a', { turn: 2 }),
-      node('r2', { turn: 3, children: ['r2a', 'r2b'] }),
-      node('r2a', { turn: 4 }),
-      node('r2b', { turn: 5 }),
+    branchView([
+      node('r1', { sessionId: 'A', turn: 1, children: ['r1a'] }),
+      node('r1a', { sessionId: 'B', turn: 2 }),
+      node('r2', { sessionId: 'C', turn: 3, children: ['r2a', 'r2b'] }),
+      node('r2a', { sessionId: 'D', turn: 4 }),
+      node('r2b', { sessionId: 'E', turn: 5 }),
     ]),
   )
   const root1 = boxOf(layout, 'r1')
@@ -494,42 +588,34 @@ track('多根（升根后的树）：两个根都在 depth 0，占独立槽段�
   assert.equal(root1.depth, 0, '第一个根的深度应为 0')
   assert.equal(root2.depth, 0, '第二个根的深度也应为 0')
   approx(root1.x, xOf(0), '根的 x 应是首列')
-  assert.equal(root1.x, root2.x, '两个根共享首列（x 只由 depth 决定）')
-  assert.notEqual(root1.y, root2.y, '两个根必须各占自己的槽段，y 不能重合')
-
-  // 3 个叶子槽位撑出的画布高度，必须容得下两棵子树（而不是被压成一行）。
-  approx(layout.size.height, heightOf(3), 'size.height 应按 3 个槽位计算')
-  assert.ok(layout.size.height >= 2 * stride, `画布高度至少要容得下两个槽段，实际 ${layout.size.height}`)
+  approx(root2.x, xOf(0), '第二个根也从首列开始（块内归一化后各占一块）')
+  assert.notEqual(root1.y, root2.y, '两个根必须各占自己的块，y 不能重合')
+  assertNoOverlap(layout, '多根')
   approx(
     Math.max(...layout.nodes.map((box) => box.y + box.height)) + PADDING,
     layout.size.height,
     'height 应刚好容下最下方的框',
   )
-  assertNoOverlap(layout, '多根')
 })
 
-track('深链不破版：12 层链不截断，靠画布双向滚动 + 缩放（替代旧的轨道压缩）', () => {
-  // 旧实现把深树的缩进压成"省略号 + 最后 4 级"；画布形态下不再截断任何东西，
-  // 深树只是把 size.width 撑大，由页面的双向滚动 + 缩放去消化（F-5 → M6）。
-  // 一条 12 轮的链属于**同一个会话**，所以整条链的边都应是主轴（main）。
-  const nodes = [node('n1', { sessionId: 'main', turn: 1, children: ['n2'] })]
-  for (let turn = 2; turn <= 12; turn += 1) {
-    nodes.push(node(`n${turn}`, { sessionId: 'main', turn, children: turn === 12 ? [] : [`n${turn + 1}`] }))
-  }
+track('深链不破版：12 层主轴不截断，画布只有一列宽（不再向右撑宽）', () => {
+  // 12 个轮次同属一个会话、**各自为根**（真机形状）→ 整条是**主轴**（竖向），画布只占一列。
+  // 这正是主轴改纵向的原因：旧版向右排会把画布撑到 3000px+。
+  const nodes = []
+  for (let turn = 1; turn <= 12; turn += 1) nodes.push(node(`n${turn}`, { sessionId: 'main', turn }))
   const layout = layoutTree(view(nodes))
-  const maxDepth = 11
 
   assert.equal(layout.nodes.length, 12, `12 层链必须排出 12 个框（不能被截断），实际 ${layout.nodes.length}`)
-  // 12 个框的链只有 11 组父子关系；边数语义 = 可见父子关系数，所以这里是 11。
-  assert.equal(layout.edges.length, layout.nodes.length - 1, '边数 = 节点数 - 1')
   assert.equal(layout.edges.length, 11, '12 层链有 11 条边')
   assert.ok(layout.edges.every((edge) => edge.axis === 'main'), '同一会话的长链应整条都是主轴')
+  const first = boxOf(layout, 'n1')
   const deepest = boxOf(layout, 'n12')
-  assert.equal(deepest.depth, maxDepth, '最深节点的深度不能被压缩改掉')
-  approx(layout.size.width, widthOf(maxDepth), 'size.width 应等于公式值')
-  approx(deepest.x, xOf(maxDepth), '最深节点的 x 应等于公式值')
-  approx(layout.size.height, heightOf(1), '单链只占一个槽位，画布高只有一行')
-  assert.ok(layout.size.width > 3000, `深链要把画布撑到 3000px 以上，实际 ${layout.size.width}`)
+  assert.equal(deepest.depth, 0, '主轴各轮同属一层（深度不随轮次增加）')
+  assert.equal(deepest.x, first.x, '整条主轴同列')
+  approx(deepest.y, first.y + 11 * rowStride, '第 12 轮应正好下移 11 行')
+  approx(layout.size.width, 2 * PADDING + NODE_W, '主轴只占一列宽（不向右撑宽）')
+  assert.ok(layout.size.height > 800, `12 轮要把画布撑高（靠纵向滚动），实际 ${layout.size.height}`)
+  assertNoOverlap(layout, '12 层主轴')
 })
 
 // ---------------------------------------------------------------------------

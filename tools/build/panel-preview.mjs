@@ -126,8 +126,15 @@ function view(nodes, currentNodeId = null) {
   }
 }
 
-/** 折叠态样本的默认目标：主轴上"带两个子对话"的那一轮（`n2`）。 */
-export const DEFAULT_COLLAPSED_ID = 'n2'
+/**
+ * 折叠态样本的默认目标：**带两个子孙的分支**（子对话 B 的 `n6`）。
+ *
+ * 为什么不用主轴上的轮次（早先用的是 `n2`）：主轴是一条**竖列**，折叠其中一轮会把它的下游整条链
+ * 一起隐藏——剩下同一列里的兄弟换个槽位而已，看起来"什么都没动"（量测里就报"没有框因折叠而重排"）。
+ * 而折叠一个有子树的**分支**，它占的纵向空间消失，同列其它分支的框会明显上移/下移，
+ * "重排"才是可观测的（这正是 F-4 要验的东西）。
+ */
+export const DEFAULT_COLLAPSED_ID = 'n6'
 
 /**
  * 验收用的样本树：一屏之内覆盖**全部新形态**，便于人工一眼核对。
@@ -513,11 +520,15 @@ ${reportError}
       var ey = ctm.b * end.x + ctm.d * end.y + ctm.f;
       var fromRect = fromEl.getBoundingClientRect();
       var toRect = toEl.getBoundingClientRect();
-      // 首点 = 父框右缘中点；末点 = 子框左缘中点（口径见 tree-layout.ts 的端点几何注释）。
-      var wantSx = fromRect.right;
-      var wantSy = fromRect.top + fromRect.height / 2;
-      var wantEx = toRect.left;
-      var wantEy = toRect.top + toRect.height / 2;
+      // 端点口径（见 tree-layout.ts 的 makeEdge）：连线有两种走向，端点也不同——
+      //   · **主轴**（同列、向下）：首点 = 父框**下缘中点**，末点 = 子框**上缘中点**（竖线连两框）；
+      //   · **分支**（往右）：首点 = 父框**右缘中点**，末点 = 子框**左缘中点**（正交折线）。
+      // 早先这里只按"右缘→左缘"判，主轴改纵向后会把所有主轴边都判成"端点离线"（实测踩过）。
+      var sameColumn = Math.abs(toRect.left - fromRect.left) < 1.5;
+      var wantSx = sameColumn ? fromRect.left + fromRect.width / 2 : fromRect.right;
+      var wantSy = sameColumn ? fromRect.bottom : fromRect.top + fromRect.height / 2;
+      var wantEx = sameColumn ? toRect.left + toRect.width / 2 : toRect.left;
+      var wantEy = sameColumn ? toRect.top : toRect.top + toRect.height / 2;
       var bad = Math.abs(sx - wantSx) > 1.5 || Math.abs(sy - wantSy) > 1.5 || Math.abs(ex - wantEx) > 1.5 || Math.abs(ey - wantEy) > 1.5;
       if (bad) {
         endpointBad += 1;

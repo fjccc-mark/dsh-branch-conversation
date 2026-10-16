@@ -725,7 +725,11 @@ function report(measured, extra) {
         collapsed.railChars === 0,
       '折叠后重排出了问题：框重叠 / 线头离线 / 框出画布 / 退化成文字列表',
     )
-    // 重排证据：折叠掉一整棵子树后，剩下的框必须让位（否则就是"折叠了但没重排"）。
+    // 重排证据：折叠掉一整棵子树后，画面必须**真的变了**——要么某个框挪了位置，
+    // 要么某个框整个消失了（后者更常见：折叠就是让后代不占位置）。
+    // ⚠️ 只比"留下来的同 id 框有没有挪动"是不够的：主轴是一条竖列，折叠其中一轮时，
+    // 留下的兄弟只是换了个槽位、甚至位置不变，但它的下游整条链已经消失了——
+    // 那同样是重排，却被这条断言误判成"折叠了但没重排"（实测踩过）。
     // 比较口径：两套夹具的 scale 不同，先把 boxesRect 归一回画布坐标（÷scale）再按 id 比。
     const sameId = []
     const collapsedBoxes = normalizedBoxes(collapsed)
@@ -736,14 +740,15 @@ function report(measured, extra) {
       sameId.push({ id, before, after: box, moved: Math.abs(before.x - box.x) > 1 || Math.abs(before.y - box.y) > 1 })
     }
     const moved = sameId.filter((item) => item.moved)
+    const removed = [...expandedBoxes.keys()].filter((id) => !collapsedBoxes.has(id))
+    const changed = moved.length + removed.length
     check(
-      `${width}px·折叠态：有框因折叠而重排（${moved.length}/${sameId.length} 个同 id 框的位置变了）`,
-      moved.length > 0,
-      moved.length > 0
+      `${width}px·折叠态：画面因折叠而重排（${moved.length} 个框挪位 + ${removed.length} 个框消失）`,
+      changed > 0,
+      changed > 0
         ? undefined
-        : `折叠后所有同 id 框的 x/y 都没变（${sameId.length} 个）。` +
-          '样本设计问题（不是 src 的问题）：请让被折叠节点的子树占用"槽位段"，' +
-          '这样折叠后同级的其它子树才会上下移动；或换一个折叠目标节点。',
+        : `折叠后既没有框挪位也没有框消失（同 id 框 ${sameId.length} 个、展开态 ${expandedBoxes.size} 个）。` +
+          '样本设计问题（不是 src 的问题）：请让被折叠节点真的带一棵子树（或换一个折叠目标）。',
     )
   }
 

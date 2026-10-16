@@ -5,22 +5,30 @@
  * 必须是 **Visio 式"节点框 + 连线"**，不是"竖向列表 + 缩进 + `│├└─` 轨道字符"。
  * 因此这里的输出不再是"若干行文本"，而是**二维几何**：
  *
- *   - `nodes`：每个节点的矩形 `{x, y, width, height}`（页面按绝对定位摆放 DOM 框）；
- *   - `edges`：每条**父子边**一条记录，带 `path`（正交折线，由父框右缘出发贴到子框左缘）
- *     与 `axis`（同会话相邻轮次 = `main` 主轴，跨会话 = `branch` 分支）；
+ *   - `boxes`：每个节点的矩形 `{x, y, width, height}`（页面按绝对定位摆放 DOM 框）；
+ *   - `edges`：每条**连接**一条记录，带 `path`（折线，端点贴框边缘）与
+ *     `axis`（同一会话相邻轮次 = `main` 主轴，跨会话 = `branch` 分支）；
  *   - `size`：整张画布的尺寸（页面用它做双向滚动）；
- *   - `hiddenTotal` / `hasOrphans`：语义与旧版一致（折叠计数、是否显示"拆分升根"入口）。
+ *   - `hiddenTotal` / `hasOrphans`：语义与旧版一致。
  *
- * 布局算法（经典紧凑树）：
- *   1. 只把**可见**节点纳入排布——折叠节点的后代既不进 `nodes` 也不进 `edges`（F-4：连线一起消失）；
- *   2. `x = PADDING + depth × (NODE_W + LEVEL_GAP)`（向右生长，根在左）；
- *   3. `y` 按"叶子顺序 + 父节点居中"：叶子依次占一个槽位，内部节点取首末子节点的中点
- *      → 每棵子树占据连续槽段，**子树之间天然不重叠**；
- *   4. 多根（父会话被删后升根）依次排在**同一列**，各占自己的槽段。
+ * ## 两种方向（这是本文件最核心的设计）
  *
- * 端点几何：折线走 `父右缘中点 → (竖线) → 子左缘中点`。
- * 为什么竖线要按子节点序号错开：多子节点时若共用一条中点竖线，线段会**穿过中间那个子框**
- * （F-8 的反例"线段穿框"）。错开 `MID_LANE_STEP` 后竖线落在相邻两个子框之间的空档里。
+ * **主轴向下、分支向右**：
+ *   - **主轴**（同一会话的相邻轮次）是"一次对话的延续"，画成**同一列的竖直链**（向下叠）；
+ *   - **分支**（跨会话：子对话 / 文件节点）向右生长成一棵子树。
+ *
+ * 为什么主轴不向右：向右的话"同一会话连续 N 轮"会排成一条 `N × 264px` 的长链
+ * （30 轮 ≈ 8000px 宽），窄屏完全没法用；而向下叠只占一列、天然可滚动。
+ * 真机数据还表明：同一个会话的轮次在树文档里往往是**各自独立的根**（`children` 全空），
+ * 所以主轴链接**必须在显示层合成**（见下）。
+ *
+ * ## 主轴是显示层合成的
+ *
+ * 真机上"同一会话的多个轮次"通常互相没有 `children` 关系（是平铺的根），
+ * 若不合成，B10 的"轴线"就永远画不出来（实测：4 个轮次 = 4 个孤立根、0 条线）。
+ * 排布时把"同一会话 + 轮次**严格连续**（`n → n+1`）"的节点串成主轴：
+ * 兄弟之间串、一起成为根的之间也串。合成出来的边带 `synthetic: true`，
+ * **不写树文档、不影响导出、不改折叠状态**（树的真值仍以文档为准）。
  * @module dsh-branch-conversation/client/tree-layout
  */
 
@@ -32,18 +40,14 @@ export const NODE_W = 208
 /** 节点框高度（px）。固定高便于"同级成行"与重叠判定。 */
 export const NODE_H = 62
 
-/** 相邻层之间的水平间隙（px）。 */
-export const LEVEL_GAP = 56
-
-/** 同级槽位之间的垂直行距（px）= 节点高 + 行间隙。 */
+/** 同一列里两个框之间的竖直间隙（px）。 */
 export const ROW_GAP = 18
+
+/** 分支列与主轴列之间、以及相邻分支层之间的水平间隙（px）。 */
+export const LEVEL_GAP = 56
 
 /** 画布内边距（px）。 */
 export const PADDING = 24
-
-/** 折线竖线相对中点错开的步长与上限（"车道"）。 */
-const MID_LANE_STEP = 14
-const MID_LANE_MAX = 4
 
 /** 一个节点的矩形（画布坐标，单位为 CSS px）。 */
 export interface TreeBox {
@@ -57,7 +61,7 @@ export interface TreeBox {
   readonly turn: number | null
   /** 所属会话 id。 */
   readonly sessionId: string
-  /** 深度（根为 0），与 `x` 一致地单调递增。 */
+  /** 分支深度（主轴上的轮次同深度；每个分支层 +1）。 */
   readonly depth: number
   /** 是否折叠（折叠的框仍显示，后代不显示）。 */
   readonly collapsed: boolean
@@ -81,18 +85,23 @@ export interface TreeBox {
   readonly height: number
 }
 
-/** 一条**父子边**（画出来的连线）。 */
+/** 一条**连接**（画出来的连线）。 */
 export interface TreeEdge {
-  /** 父节点 id。 */
+  /** 起点节点 id。 */
   readonly from: string
-  /** 子节点 id。 */
+  /** 终点节点 id。 */
   readonly to: string
   /**
    * `main` = 同一会话相邻轮次（轴线，B10 的"多次问答节点连成的线"）；
    * `branch` = 跨会话（在某节点上开出的子对话）/ 文件节点。
    */
   readonly axis: 'main' | 'branch'
-  /** 正交折线的 SVG `d`（`M … L … L … L …`），端点贴在两个框的边缘上。 */
+  /**
+   * 这条边是不是**显示层合成**的主轴连线（树文档里并没有这组父子关系）。
+   * 见文件头"主轴是显示层合成的"。
+   */
+  readonly synthetic?: boolean
+  /** 折线的 SVG `d`，端点贴在两个框的边缘上。 */
   readonly path: string
   /** 起点（父框右缘中点）。 */
   readonly x1: number
@@ -112,7 +121,7 @@ export interface TreeSize {
 export interface TreeLayout {
   /** 可见节点（含各自矩形）。 */
   readonly nodes: readonly TreeBox[]
-  /** 可见的父子边（**边数 = 可见父子关系数**，F-8）。 */
+  /** 可见的连接（条数 = 可见父子关系数 + 主轴合成数）。 */
   readonly edges: readonly TreeEdge[]
   /** 画布尺寸（双向滚动用）。 */
   readonly size: TreeSize
@@ -134,8 +143,41 @@ const EMPTY: TreeLayout = {
 /** 从 `BranchTreeView` 里取出的节点视图类型。 */
 type NodeView = BranchTreeView['document']['nodes'][number]
 
+/** 排布期的一个节点（局部坐标，最后统一平移到画布坐标）。 */
+interface PlacedNode {
+  readonly id: string
+  readonly kind: 'qa' | 'file'
+  readonly label: string
+  readonly turn: number | null
+  readonly sessionId: string
+  readonly depth: number
+  readonly collapsed: boolean
+  readonly hiddenChildren: number
+  readonly orphan: boolean
+  readonly filePath: string | null
+  readonly fileMissing: boolean
+  readonly current: boolean
+  /** 局部坐标（原点 = 所在子树的根框左上角，最后统一平移到画布坐标）。 */
+  x: number
+  y: number
+  /** 这棵子树的外接尺寸（相对子树根框的左上角，右下角即 `width × height`）。 */
+  width: number
+  height: number
+}
+
+/** 一条待算路径的连接（两端都排好后再算折线）。 */
+interface PendingEdge {
+  readonly from: string
+  readonly to: string
+  readonly synthetic: boolean
+  /** `main`（同会话主轴）还是 `branch`（跨会话分支）。 */
+  readonly axis: 'main' | 'branch'
+  /** 做车道错开用的序号（同一个父节点的第几个连接）。 */
+  readonly order: number
+}
+
 /**
- * 把树视图排成画布（节点矩形 + 父子连线）。
+ * 把树视图排成画布（节点矩形 + 连线）。
  *
  * 幂等、无副作用、不抛错：数据损坏（悬空子节点 id / 环 / 自环）时按"每个节点最多出现一次"降级。
  * @param view - 服务器返回的树视图（可为 null：还没读到树）。
@@ -152,57 +194,101 @@ export function layoutTree(view: BranchTreeView | null): TreeLayout {
   const roots = nodes.filter((node) => !childIds.has(node.id))
   const startNodes = roots.length > 0 ? roots : nodes
 
-  /** 已排布的节点（按槽位坐标存，最后统一换算成像素）。 */
-  const staged: {
-    id: string
-    kind: 'qa' | 'file'
-    label: string
-    turn: number | null
-    sessionId: string
-    depth: number
-    collapsed: boolean
-    hiddenChildren: number
-    orphan: boolean
-    filePath: string | null
-    fileMissing: boolean
-    current: boolean
-    slot: number
-  }[] = []
-  /** `staged` 的 id → 下标（父节点居中要用）。 */
-  const at = new Map<string, number>()
   /**
-   * 排布期**真正建立**的父子连接（`[父 id, 子 id]`）。
+   * 显示层合成的**主轴链**：`id → 下一个连续轮次的节点`。
    *
-   * 为什么不事后拿 `node.children` 再算一遍：数据损坏（`a→b→a` 的环、`x→x` 的自环）时
-   * 递归靠 `visited` 会把每个节点只排一次，但"事后重算"会把环上每一条都当成可见边画出来
-   * （于是出现 `a→b` 与 `b→a` 两条、或一条自环）。**画出来的线必须与排布时的父子关系严格相等**，
-   * 否则 F-8 的"边数 = 可见父子关系数"就成了空话。
+   * 两处都要登记（真机数据两种形状都出现过）：
+   *   ① 同一个父节点下平铺的兄弟轮次；
+   *   ② 一起成为根的那些轮次（真机上最常见：每个轮次都是独立根、`children` 全空）。
    */
-  const links: { from: string; to: string }[] = []
-  const visited = new Set<string>()
-  /** 下一个可用的叶子槽位（只增不减，与"深度优先的叶子顺序"一致）。 */
-  let nextSlot = 0
-  let hiddenTotal = 0
+  const chainOf = new Map<string, NodeView>()
+  {
+    /** 一组候选里，把"同会话 + 轮次严格连续"的依次接起来。 */
+    const register = (candidates: readonly NodeView[]): void => {
+      const tailOf = new Map<string, NodeView>()
+      const ordered = [...candidates].sort(
+        (left, right) => (left.turn ?? Number.MAX_SAFE_INTEGER) - (right.turn ?? Number.MAX_SAFE_INTEGER),
+      )
+      for (const item of ordered) {
+        if (item.turn === null) continue
+        const tail = tailOf.get(item.sessionId)
+        if (tail !== undefined && tail.turn !== null && item.turn === tail.turn + 1) chainOf.set(tail.id, item)
+        tailOf.set(item.sessionId, item)
+      }
+    }
+    for (const node of nodes) {
+      if (node.collapsed) continue
+      register(node.children.map((childId) => byId.get(childId)).filter((child): child is NodeView => child !== undefined))
+    }
+    register(startNodes)
+  }
+
+  const placed = new Map<string, PlacedNode>()
+  const pendingEdges: PendingEdge[] = []
 
   /**
-   * 递归排布；返回该子树占用的槽段 `[first, last]`。
+   * 被"折叠的主轴轮次"**连带隐藏**的下游轮次。
    *
-   * 为什么用返回值而不是就地写 `y`：父节点的槽位是**首末子节点 slot 的中点**，
-   * 必须等子树全部排完才知道（经典紧凑树的两遍式做法，这里一次递归搞定）。
+   * 为什么需要单独一张表：主轴链接是显示层合成的，下游轮次在树文档里**并不是**那个折叠节点的孩子，
+   * 所以"折叠节点 → 跳过它的 children"这条常规逻辑抓不到它们。
+   * 不处理的话，下游轮次会以"自己还是根"的身份重新出现在画布上——实测就是
+   * "折叠第 2 轮后，第 3、4 轮跳到最上面一排"（既没隐藏，位置也乱了）。
+   * 这里先沿主轴链把下游整条链标出来，再由 `build` 直接跳过。
+   */
+  const hiddenSpine = new Set<string>()
+  for (const node of nodes) {
+    if (!node.collapsed) continue
+    let downstream = chainOf.get(node.id)
+    while (downstream !== undefined && !hiddenSpine.has(downstream.id)) {
+      hiddenSpine.add(downstream.id)
+      downstream = chainOf.get(downstream.id)
+    }
+  }
+
+  /**
+   * 把以 `rootId` 为根的整棵子树（真孩子 + 主轴下游）整体平移。
+   *
+   * 为什么要"整棵"：分支子树要挪到本框右侧、主轴下游要挪到本框下方，
+   * 只挪根节点会把它的子孙留在原来的行/列上（这正是早先那版把框叠在一起的根因）。
+   * @param rootId - 子树根 id。
+   * @param dx - 水平位移。
+   * @param dy - 竖直位移。
+   */
+  const shiftSubtree = (rootId: string, dx: number, dy: number): void => {
+    if (dx === 0 && dy === 0) return
+    const stack = [rootId]
+    const seenShift = new Set<string>()
+    while (stack.length > 0) {
+      const id = stack.pop()
+      if (id === undefined || seenShift.has(id)) continue
+      seenShift.add(id)
+      const item = placed.get(id)
+      if (item !== undefined) {
+        item.x += dx
+        item.y += dy
+      }
+      const node = byId.get(id)
+      if (node !== undefined) stack.push(...node.children)
+      const next = chainOf.get(id)
+      if (next !== undefined) stack.push(next.id)
+    }
+  }
+
+  /**
+   * 递归排布一棵子树（后序：先算子节点，再摆自己）。
+   *
+   * 坐标系是**局部**的：子树内部从 `(0, 0)` 起算，父节点按"主轴列 + 分支子树"两块拼起来，
+   * 最后统一平移到画布坐标。这样就不需要"先排再挪"（那种做法很容易把子孙落在别的行上）。
    * @param node - 当前节点。
-   * @param depth - 深度（根为 0）。
-   * @returns 该子树占用的槽位区间。
+   * @param depth - 分支深度（主轴不变、分支 +1）。
+   * @param seen - 本棵树已见过的节点（防环）。
+   * @returns 该子树的锚点信息；节点已被排过时返回 null。
    */
-  const place = (node: NodeView, depth: number): { first: number; last: number } => {
-    visited.add(node.id)
-    const children = node.collapsed
-      ? []
-      : node.children
-          .map((childId) => byId.get(childId))
-          .filter((child): child is NodeView => child !== undefined && !visited.has(child.id))
-    hiddenTotal += node.collapsed ? countDescendants(node.id, byId) : 0
+  const build = (node: NodeView, depth: number, seen: Set<string>): PlacedNode | null => {
+    if (seen.has(node.id) || hiddenSpine.has(node.id)) return null
+    seen.add(node.id)
 
-    const record = {
+    const record: PlacedNode = {
       id: node.id,
       kind: node.kind,
       label: node.label,
@@ -215,109 +301,258 @@ export function layoutTree(view: BranchTreeView | null): TreeLayout {
       filePath: node.file?.path ?? null,
       fileMissing: node.file?.missing ?? false,
       current: node.id === view.currentNodeId,
-      slot: 0,
+      x: 0,
+      y: 0,
+      width: NODE_W,
+      height: NODE_H,
     }
-    at.set(node.id, staged.push(record) - 1)
+    placed.set(node.id, record)
 
-    if (children.length === 0) {
-      // 叶子：占一个新槽位（下一个叶子再 +1）。
-      const slot = nextSlot
-      nextSlot += 1
-      record.slot = slot
-      return { first: slot, last: slot }
-    }
+    /** 主轴下游（同一个会话的下一轮）。 */
+    const spineNext = node.collapsed ? undefined : chainOf.get(node.id)
 
-    const spans = children.map((child) => place(child, depth + 1))
-    const first = spans[0]?.first ?? 0
-    const last = spans[spans.length - 1]?.last ?? first
-    // 父节点居中于首末子节点之间（"同级成行"的观感就从这里来）。
-    record.slot = (first + last) / 2
-    // 顺序与 `children` 一致，供下面的连线按"第几个子节点"错开竖直车道。
-    children.forEach((child) => links.push({ from: node.id, to: child.id }))
-    return { first, last }
-  }
+    // 真孩子：过滤悬空 id / 本批重复 / 已排过的。
+    // ⚠️ **主轴下游要排除在外**：它虽然常常也在 `children` 里（真父子 + 轮次连续），
+    // 但必须走"主轴向下"那条路（同列下移），不能按普通分支往右排——
+    // 否则出现"主轴横向摆开、边还用分支折线，端点自然对不上"的错乱（实测就是这么暴露的）。
+    const batch = new Set<string>()
+    if (spineNext !== undefined) batch.add(spineNext.id)
+    const realChildren = node.collapsed
+      ? []
+      : node.children
+          .map((childId) => byId.get(childId))
+          .filter((child): child is NodeView => {
+            if (child === undefined) return false
+            if (seen.has(child.id) || batch.has(child.id)) return false
+            batch.add(child.id)
+            return true
+          })
+          .sort((left, right) => (left.turn ?? Number.MAX_SAFE_INTEGER) - (right.turn ?? Number.MAX_SAFE_INTEGER))
 
-  startNodes.forEach((node) => {
-    if (!visited.has(node.id)) place(node, 0)
-  })
-
-  // --- 槽位坐标 → 像素坐标 ---
-  const stride = NODE_H + ROW_GAP
-  const slots = staged.map((item) => item.slot)
-  const minSlot = Math.min(...slots)
-  const maxSlot = Math.max(...slots)
-  const maxDepth = Math.max(...staged.map((item) => item.depth))
-  const xOf = (depth: number): number => PADDING + depth * (NODE_W + LEVEL_GAP)
-  const yOf = (slot: number): number => PADDING + (slot - minSlot) * stride
-
-  const placed: TreeBox[] = staged.map((item) => ({
-    id: item.id,
-    kind: item.kind,
-    label: item.label,
-    turn: item.turn,
-    sessionId: item.sessionId,
-    depth: item.depth,
-    collapsed: item.collapsed,
-    hiddenChildren: item.hiddenChildren,
-    orphan: item.orphan,
-    filePath: item.filePath,
-    fileMissing: item.fileMissing,
-    current: item.current,
-    x: xOf(item.depth),
-    y: yOf(item.slot),
-    width: NODE_W,
-    height: NODE_H,
-  }))
-
-  // --- 边：**只画排布期真正建立的父子连接**（见 `links` 的注释），端点严格贴框边缘 ---
-  /** 同一条连接在"同一个父节点的第几个子"——决定竖直车道往哪边错开。 */
-  const orderOf = new Map<string, number>()
-  /** 每个父节点已经出现过几个连接（单遍计数，别对每个连接重新扫一遍 `links`）。 */
-  const seenFrom = new Map<string, number>()
-  for (const link of links) {
-    const nth = seenFrom.get(link.from) ?? 0
-    seenFrom.set(link.from, nth + 1)
-    orderOf.set(`${link.from}\u0000${link.to}`, nth)
-  }
-  const edges: TreeEdge[] = links.flatMap((link) => {
-    const parent = staged[at.get(link.from) ?? -1]
-    const child = staged[at.get(link.to) ?? -1]
-    // 排布期建立过、却找不到记录：只可能是数据损坏，按"不画悬空线"处理。
-    if (parent === undefined || child === undefined) return []
-    const siblingIndex = orderOf.get(`${link.from}\u0000${link.to}`) ?? 0
-    // 车道错开（0 → 0，1 → +1，2 → -1，3 → +2，4 → -2…），夹在 ±MID_LANE_MAX 个车道内。
-    const laneRaw = siblingIndex <= 0 ? 0 : Math.ceil(siblingIndex / 2) * (siblingIndex % 2 === 1 ? 1 : -1)
-    const lane = Math.max(-MID_LANE_MAX, Math.min(MID_LANE_MAX, laneRaw))
-    const parentRight = xOf(parent.depth) + NODE_W
-    const childLeft = xOf(parent.depth + 1)
-    const laneX = parentRight + (childLeft - parentRight) / 2 + lane * MID_LANE_STEP
-    const x1 = parentRight
-    const y1 = yOf(parent.slot) + NODE_H / 2
-    const x2 = childLeft
-    const y2 = yOf(child.slot) + NODE_H / 2
-    return [
-      {
-        from: parent.id,
+    // 分支子树：都在本框**右侧同一列起算**，彼此**上下叠**（不互相往右推）。
+    // 为什么：往右推的话"一个父节点挂多个子对话"会越来越宽（每个兄弟加一整列），
+    // 而画布的纵向空间更便宜——和"主轴向下"是同一个理由。
+    //
+    // ⚠️ 两条必须遵守的规则（都踩过坑）：
+    //   ① 每棵分支子树占的竖直高度要用它的**全高**（自己 + 所有后代），
+    //      只算"直接子框的高度"会让下一棵分支压到上一棵的深层后代上
+    //      （实测：`n3` 的文件节点 f1 正好压在 `n2` 的深层链中段上）；
+    //   ② 压完之后**父框必须排在这些分支子树下面**（`branchTop = NODE_H + ROW_GAP`），
+    //      否则父框会和自己的分支子树重叠。
+    let branchWidth = 0
+    let branchBottom = 0
+    const branchTop = NODE_H + ROW_GAP
+    let cursor = branchTop
+    realChildren.forEach((child, order) => {
+      const childTree = build(child, depth + 1, seen)
+      if (childTree === null) return
+      // ⚠️ 先读它**平移前**的尺寸，再平移：平移后再读 `childTree.x` 就变成"已移过"的值，
+      // 会变成"平移平方"（早先那版把 n2 挪到 552 就是这么来的）。
+      const treeWidth = childTree.width
+      const treeHeight = childTree.height
+      shiftSubtree(child.id, NODE_W + LEVEL_GAP, cursor)
+      branchWidth = Math.max(branchWidth, treeWidth)
+      cursor += treeHeight + ROW_GAP
+      branchBottom = cursor - ROW_GAP
+      pendingEdges.push({
+        from: node.id,
         to: child.id,
-        axis: child.sessionId === parent.sessionId ? 'main' : 'branch',
-        path: `M ${num(x1)} ${num(y1)} L ${num(laneX)} ${num(y1)} L ${num(laneX)} ${num(y2)} L ${num(x2)} ${num(y2)}`,
-        x1: num(x1),
-        y1: num(y1),
-        x2: num(x2),
-        y2: num(y2),
-      } satisfies TreeEdge,
-    ]
-  })
+        synthetic: false,
+        // 同一个会话的兄弟（缺号、没被主轴串上的那部分）算主轴；跨会话才算分支。
+        axis: child.sessionId === node.sessionId ? 'main' : 'branch',
+        order,
+      })
+    })
 
+    // 主轴下游：**同列、向下叠**（本框下缘 + 间隙）。
+    const spineChildId = spineNext?.id
+    const spineTree = spineNext === undefined ? null : build(spineNext, depth, seen)
+    const spineHeight = spineTree === null ? 0 : spineTree.height
+    if (spineChildId !== undefined) {
+      shiftSubtree(spineChildId, 0, NODE_H + ROW_GAP)
+      pendingEdges.push({
+        from: node.id,
+        to: spineChildId,
+        // 合成的主轴连线**一定是主轴**：能被合成的前提就是"同会话 + 轮次连续"。
+        synthetic: true,
+        axis: 'main',
+        order: 0,
+      })
+    }
+
+    /** 子树在自己坐标系里的外接尺寸（坐标原点 = 本框左上角）。 */
+    const spineBottom = spineTree === null ? NODE_H : NODE_H + ROW_GAP + spineHeight
+    record.width = Math.max(
+      NODE_W + (branchWidth === 0 ? 0 : LEVEL_GAP + branchWidth),
+      spineTree === null ? NODE_W : spineTree.width,
+    )
+    // 高度 = 本框与"主轴列 / 分支列"里最低的那条边（两者都可能比一个框高得多）。
+    record.height = Math.max(spineBottom, branchBottom)
+    return record
+  }
+
+  /**
+   * 逐棵树排布。**共用一个 `seen`**：主轴会把"各自为根"的连续轮次串进同一棵树，
+   * 那些根随后再进循环时就会被跳过——否则同一条主轴会被重复排一遍、边也跟着重复。
+   *
+   * ⚠️ 遍历顺序必须是"**按会话分组、组内按轮次**"：`register()` 把连续轮次的**前一个**记成了
+   * 主轴头，若先走到后一个（例如两个同会话的根 r1、r2），它会以"自己就是根"的身份先被排掉，
+   * 前一个再来时链就断了（真机与单测都出现过"两个根落在同一格"的现象）。
+   */
+  const rootOrder = [...startNodes].sort((left, right) => {
+    if (left.sessionId !== right.sessionId) return left.sessionId < right.sessionId ? -1 : 1
+    const leftTurn = left.turn ?? Number.MAX_SAFE_INTEGER
+    const rightTurn = right.turn ?? Number.MAX_SAFE_INTEGER
+    if (leftTurn !== rightTurn) return leftTurn - rightTurn
+    return left.id < right.id ? -1 : left.id > right.id ? 1 : 0
+  })
+  const seen = new Set<string>()
+  for (const start of rootOrder) {
+    build(start, 0, seen)
+  }
+
+  /**
+   * 平移到画布坐标：**先按连通块分组、块内归一化，再自上而下叠放**。
+   *
+   * 为什么要按连通块：同一份文档里可能有多个互不相连的根（真实数据里很常见——几个会话的
+   * 轮次各自为根，彼此没有关系；升根后的多棵树也可能落在一份文档里）。
+   * 直接对整张图做一次平移会让这些根**落在同一格**（重叠），所以必须一块一块地摆。
+   */
+  const components: string[][] = []
+  {
+    const visitedIds = new Set<string>()
+    for (const id of placed.keys()) {
+      if (visitedIds.has(id)) continue
+      const members: string[] = []
+      const stack = [id]
+      while (stack.length > 0) {
+        const current = stack.pop()
+        if (current === undefined || visitedIds.has(current)) continue
+        visitedIds.add(current)
+        members.push(current)
+        const node = byId.get(current)
+        if (node !== undefined) stack.push(...node.children)
+        const next = chainOf.get(current)
+        if (next !== undefined) stack.push(next.id)
+      }
+      components.push(members)
+    }
+  }
+
+  const canvasNodes: TreeBox[] = []
+  const idToBox = new Map<string, TreeBox>()
+  let cursorY = PADDING
+  for (const members of components) {
+    const items = members.map((id) => placed.get(id)).filter((item): item is PlacedNode => item !== undefined)
+    if (items.length === 0) continue
+    const minX = Math.min(...items.map((item) => item.x))
+    const minY = Math.min(...items.map((item) => item.y))
+    for (const item of items) {
+      const box: TreeBox = {
+        id: item.id,
+        kind: item.kind,
+        label: item.label,
+        turn: item.turn,
+        sessionId: item.sessionId,
+        depth: item.depth,
+        collapsed: item.collapsed,
+        hiddenChildren: item.hiddenChildren,
+        orphan: item.orphan,
+        filePath: item.filePath,
+        fileMissing: item.fileMissing,
+        current: item.current,
+        x: PADDING + (item.x - minX),
+        y: cursorY + (item.y - minY),
+        width: NODE_W,
+        height: NODE_H,
+      }
+      canvasNodes.push(box)
+      idToBox.set(box.id, box)
+    }
+    const blockHeight = Math.max(...items.map((item) => item.y + NODE_H)) - minY
+    cursorY += blockHeight + ROW_GAP * 2
+  }
+
+  /**
+   * 折叠隐藏数 = **没被排出来的节点数**（总节点 − 实际排出来的）。
+   *
+   * 为什么不逐一累加"折叠节点的真实后代"：折叠某一轮时，被连带隐藏的**主轴下游轮次**
+   * 在树文档里并不是它的孩子（见文件头"主轴是显示层合成的"），逐一累加会漏掉它们。
+   * 用"总数 − 已排数"最稳，也自然包含真实后代。
+   */
+  const hiddenTotal = nodes.length - placed.size
+
+  // --- 连线 ---
+  const edges: TreeEdge[] = []
+  for (const pending of pendingEdges) {
+    const from = idToBox.get(pending.from)
+    const to = idToBox.get(pending.to)
+    if (from === undefined || to === undefined) continue
+    edges.push(makeEdge(from, to, pending))
+  }
+
+  const maxX = Math.max(...canvasNodes.map((box) => box.x + NODE_W), PADDING)
+  const maxY = Math.max(...canvasNodes.map((box) => box.y + NODE_H), PADDING)
   return {
-    nodes: placed,
+    nodes: canvasNodes,
     edges,
-    size: {
-      width: 2 * PADDING + (maxDepth + 1) * NODE_W + maxDepth * LEVEL_GAP,
-      height: 2 * PADDING + (maxSlot - minSlot + 1) * stride - ROW_GAP,
-    },
+    size: { width: maxX + PADDING, height: maxY + PADDING },
     hiddenTotal,
     hasOrphans: nodes.some((node) => node.orphan),
+  }
+}
+
+/**
+ * 算一条连接的折线。
+ *
+ * 三种情形：
+ *   - **向右的分支**：`父右缘 → 中点竖线 → 子左缘`（经典树形折线）；
+ *   - **主轴向下**（子在父正下方）：直接一条竖线连两框（`父下缘中点 → 子上缘中点`），
+ *     这条线走两框之间的空隙，**不穿任何框**——它就是 B10 的"轴线"；
+ *   - 其它（子与父同列但不相邻等损坏情形）：退回向右的折线。
+ * @param from - 起点框。
+ * @param to - 终点框。
+ * @param pending - 这条连接的元信息。
+ * @returns 连线记录。
+ */
+function makeEdge(from: TreeBox, to: TreeBox, pending: PendingEdge): TreeEdge {
+  const fromRight = from.x + NODE_W
+  const fromMidY = from.y + NODE_H / 2
+  const toMidY = to.y + NODE_H / 2
+  const directlyBelow = Math.abs(to.x - from.x) < 1 && to.y >= from.y + NODE_H
+
+  if (directlyBelow) {
+    // 主轴：竖直一条线，从父框下缘中点连到子框上缘中点。
+    const x = from.x + NODE_W / 2
+    const y1 = from.y + NODE_H
+    const y2 = to.y
+    return {
+      from: from.id,
+      to: to.id,
+      axis: 'main',
+      synthetic: pending.synthetic,
+      path: `M ${num(x)} ${num(y1)} L ${num(x)} ${num(y2)}`,
+      x1: num(x),
+      y1: num(y1),
+      x2: num(x),
+      y2: num(y2),
+    }
+  }
+
+  // 向右：父右缘 → 中点竖线 → 子左缘。
+  const laneStep = pending.order <= 0 ? 0 : Math.ceil(pending.order / 2) * (pending.order % 2 === 1 ? 1 : -1)
+  const lane = Math.max(-4, Math.min(4, laneStep))
+  const mid = fromRight + (to.x - fromRight) / 2 + lane * 14
+  return {
+    from: from.id,
+    to: to.id,
+    axis: pending.axis,
+    synthetic: pending.synthetic,
+    path: `M ${num(fromRight)} ${num(fromMidY)} L ${num(mid)} ${num(fromMidY)} L ${num(mid)} ${num(toMidY)} L ${num(to.x)} ${num(toMidY)}`,
+    x1: num(fromRight),
+    y1: num(fromMidY),
+    x2: num(to.x),
+    y2: num(toMidY),
   }
 }
 
