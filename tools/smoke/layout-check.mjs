@@ -471,7 +471,18 @@ async function measureFromFile(fixture) {
 }
 
 /**
- * 让无头浏览器给某一档存一张截图（人工核对 F-3/F-4/F-5 的证据）。
+ * 截图时"要不要整体缩小观感"的下限宽度（CSS px）。
+ *
+ * 为什么需要这条：夹具的 `?scale=` 是给**量测**用的——Windows 上 Chromium 窗口最小约 500px，
+ * 更窄的档只能靠"固定宽度裁剪容器 + `transform: scale()`"做出来。但 `scale` 也会把整页缩掉：
+ * `360` 档的 `scale = 360/2000 = 0.18`，截出来是一张**看不清的缩略图**，
+ * 拿它当"窄屏仍是框 + 线"的证据毫无意义（实测踩过：360px 截图里节点框细到看不见）。
+ * 所以**窄档（< 1000px）截图一律 `scale=1`**、按真实尺寸出图（内容会被裁剪，但看得清），
+ * 只有宽档才用 `scale` 压进窗口。
+ */
+const SHOT_MIN_UNSCALED_WIDTH = 1000
+
+/**
  *
  * 走 CDP（见 {@link CDP_PORT} 的注释：`--screenshot` 在本机不落盘）。
  * 视口宽取 `max(目标宽, 520)`：夹具里还有 220px 的"侧边栏"外壳，
@@ -490,6 +501,20 @@ async function shootFixture(cdp, url, shotName, width, label) {
   await capturePng(cdp, url, shot, Math.max(width, 520), SHOT_HEIGHT)
   if (!existsSync(shot)) throw new Error(`${label}：CDP 说截好了但 ${shot} 不在`)
   return shot
+}
+
+/**
+ * 拼某一套夹具的**截图**地址。
+ *
+ * 与量测用的地址有意不同：`?w=` 照旧（决定裁剪容器宽 = 目标布局宽），
+ * 但 `?scale=` 在窄档一律给 `1`——原因见 {@link SHOT_MIN_UNSCALED_WIDTH}。
+ * @param {string} base - 本机夹具服务地址。
+ * @param {{ fileName: string; width: number }} fixture - 夹具。
+ * @returns {string} 截图地址。
+ */
+function shotUrlOf(base, fixture) {
+  const scale = fixture.width < SHOT_MIN_UNSCALED_WIDTH ? 1 : Math.min(1, fixture.width / WINDOW_WIDTH)
+  return `${base}/${fixture.fileName}?w=${fixture.width}&scale=${scale.toFixed(4)}`
 }
 
 /**
@@ -863,10 +888,11 @@ if (checkFilesOnly) {
           shotBrowser = startShotBrowser(browser, userDataDir)
           cdp = await connectCdp(await waitForCdpEndpoint(CDP_PORT))
           for (const fixture of fixtures) {
-            const url = `${base}/${fixture.fileName}?w=${fixture.width}&scale=${scaleOf(fixture.width)}`
             try {
               // eslint-disable-next-line no-await-in-loop
-              shots.push(await shootFixture(cdp, url, fixture.shotName, fixture.width, `${fixture.key}`))
+              shots.push(
+                await shootFixture(cdp, shotUrlOf(base, fixture), fixture.shotName, fixture.width, `${fixture.key}`),
+              )
             } catch (cause) {
               missing.push({ fixture, detail: cause instanceof Error ? cause.message : String(cause) })
             }
