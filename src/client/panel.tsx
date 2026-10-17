@@ -18,7 +18,8 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import type { ChangeEvent, ReactElement, ReactNode, RefObject, WheelEvent } from 'react'
 import { branchApi, type BranchCreateValue, type BranchTreeView } from './branch-api.ts'
 import { useCapabilityReport } from './capability.ts'
-import { openSessionById, subscribeNavigationReady } from './navigation.ts'
+import { jumpToTurn } from './jump-to-turn.ts'
+import { loadSessionThrough, openSessionById, subscribeNavigationReady } from './navigation.ts'
 import { isSessionNode, layoutTree, type TreeBox, type TreeLayout } from './tree-layout.ts'
 import { sessionsFace, sessionsFaceReady } from './use-main-session.ts'
 import { canAutoFit, captureScroll, readViewState, restoreScroll, setViewZoom } from './view-state.ts'
@@ -150,7 +151,7 @@ export function useBranchCanvasState(sessionId: string | null): {
   refresh: (target: string | null) => Promise<void>
   applyZoom: (next: number) => void
   onWheel: (event: WheelEvent<HTMLDivElement>) => void
-  onOpenSession: (target: string) => void
+  onOpenSession: (box: TreeBox) => void
   onOpenFile: (box: TreeBox) => Promise<void>
   onToggle: (box: TreeBox) => Promise<void>
 } {
@@ -204,10 +205,25 @@ export function useBranchCanvasState(sessionId: string | null): {
     [refresh, sessionId],
   )
 
-  const onOpenSession = useCallback((target: string) => {
-    if (!openSessionById(target)) {
+  /**
+   * 点节点：切到该会话，并**滚到对应轮次**。
+   *
+   * 只调 `openSession` 会停在对话末尾（官方打开会话就是停在最新位置），所以这里接着做一次
+   * {@link jumpToTurn}：按 `data-chat-turn` 找到这一轮的锚点滚过去；很早的轮次不在 DOM 里时，
+   * 先用节点上的 `anchorSeq` 调官方 `ISession.loadThrough` 把历史加载到那一轮。
+   * 跳转失败（老数据没有锚点/会话已换）**不报错**，用户看到的就是原来的"停在末尾"。
+   * @param box - 被点的节点（文件节点走打开文件，这里只管问答节点）。
+   */
+  const onOpenSession = useCallback((box: TreeBox) => {
+    if (!openSessionById(box.sessionId)) {
       setFailure('这个部署没有可用的会话切换入口（uiWorkspace.openSession 还没就绪）')
+      return
     }
+    if (box.turn === null) return
+    void jumpToTurn(
+      { turn: box.turn, anchorSeq: box.anchorSeq },
+      { loadThrough: (seq) => loadSessionThrough(box.sessionId, seq) },
+    )
   }, [])
 
   // 导航面可能比页面晚就绪：就绪后自动清掉"没有切换入口"的提示（用户不必手动刷新）。
@@ -598,7 +614,7 @@ function BranchCanvas({
   zoom: number
   viewportRef: RefObject<HTMLDivElement>
   onWheel: (event: WheelEvent<HTMLDivElement>) => void
-  onOpenSession: (sessionId: string) => void
+  onOpenSession: (box: TreeBox) => void
   onOpenFile: (box: TreeBox) => void
   onToggle: (box: TreeBox) => void
   onBranch: (box: TreeBox) => void
@@ -798,7 +814,7 @@ function NodeBox({
   onBranch,
 }: {
   box: TreeBox
-  onOpenSession: (sessionId: string) => void
+  onOpenSession: (box: TreeBox) => void
   onOpenFile: (box: TreeBox) => void
   onToggle: (box: TreeBox) => void
   onBranch: (box: TreeBox) => void
@@ -813,7 +829,7 @@ function NodeBox({
 
   const activate = (): void => {
     if (box.kind === 'file') onOpenFile(box)
-    else if (isSessionNode(box)) onOpenSession(box.sessionId)
+    else if (isSessionNode(box)) onOpenSession(box)
   }
 
   return (

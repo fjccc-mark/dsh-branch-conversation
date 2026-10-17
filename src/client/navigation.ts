@@ -7,6 +7,8 @@
  * @module dsh-branch-conversation/client/navigation
  */
 
+import { sessionsFace } from './use-main-session.ts'
+
 /** 导航面。 */
 export interface NavigationFace {
   /** 把主视图切到某个会话。 */
@@ -105,4 +107,36 @@ export function openSessionById(sessionId: string): boolean {
   if (installed === undefined) return false
   installed.openSession(sessionId)
   return true
+}
+
+/**
+ * 把某个会话的历史**加载到指定 seq**（点很早的一轮时用）。
+ *
+ * 对话视图是分页打开的：先只拿最近一段，早期轮次不在 DOM 里，光靠 `scrollIntoView` 找不到。
+ * 官方的 `ISession.loadThrough(seq)` 正是"加载到这个事件为止"，但拿到 `ISession` 要先
+ * `ctx.sessions.using(...)` 借一个引用（跑完自动释放）——这里全部做成**可选 + 不抛**：
+ * 服务缺失、形状不符、加载失败都只是返回 `false`，由调用方退化为"停在对话末尾"。
+ *
+ * @param sessionId - 目标会话。
+ * @param seq - 该轮 `turn/end` 的 seq（树节点上的 `anchorSeq`）。
+ * @returns 是否真的把加载做了（不代表 seq 一定已在 DOM 里）。
+ */
+export async function loadSessionThrough(sessionId: string, seq: number): Promise<boolean> {
+  const face = sessionsFace()
+  const using = face?.using
+  if (typeof using !== 'function') return false
+  try {
+    await using.call(
+      face,
+      sessionId,
+      { source: 'controllerOperation' },
+      async (reference) => {
+        const binding = await reference.ready
+        await binding.session.loadThrough(seq)
+      },
+    )
+    return true
+  } catch {
+    return false
+  }
 }

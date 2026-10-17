@@ -22,6 +22,8 @@ export interface BranchNodeView {
   readonly id: string
   readonly sessionId: string
   readonly turn: number | null
+  /** 该轮 `turn/end` 的事件 seq（建子会话时的血缘锚点；也用来**把历史加载到这一轮**）。 */
+  readonly anchorSeq: number | null
   readonly kind: 'qa' | 'file'
   readonly label: string
   readonly collapsed: boolean

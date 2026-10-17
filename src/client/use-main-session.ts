@@ -37,6 +37,19 @@ export interface ClientSessions {
   readonly list?: SessionsFace['list']
   /** 会话的 cwd（展示与校验用）。 */
   readonly cwd?: (sessionId: string) => string | undefined
+  /**
+   * `ctx.sessions.using(target, { source }, operation)`：借一个会话引用跑一段操作（跑完自动释放）。
+   *
+   * 用途：把历史**加载到某一轮**（`reference.ready` → `binding.session.loadThrough(seq)`），
+   * 这样"点很早的一轮"也能定位到（对话是分页加载的，早期轮次一开始不在 DOM 里）。
+   */
+  readonly using?: (
+    target: string,
+    options: { readonly source: 'controllerOperation' | 'gateway' },
+    operation: (reference: {
+      readonly ready: Promise<{ readonly session: { loadThrough(seq: number): Promise<void> } }>
+    }) => unknown,
+  ) => Promise<unknown>
 }
 
 /** 模块级持有：入口安装一次，页面组件读取。 */

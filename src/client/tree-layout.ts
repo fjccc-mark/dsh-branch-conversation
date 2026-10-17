@@ -59,6 +59,8 @@ export interface TreeBox {
   readonly label: string
   /** 轮次序号（文件节点为 null）。 */
   readonly turn: number | null
+  /** 该轮 `turn/end` 的 seq（点节点时用它把历史加载到那一轮；文件节点/占位节点为 null）。 */
+  readonly anchorSeq: number | null
   /** 所属会话 id。 */
   readonly sessionId: string
   /** 分支深度（主轴上的轮次同深度；每个分支层 +1）。 */
@@ -149,6 +151,7 @@ interface PlacedNode {
   readonly kind: 'qa' | 'file'
   readonly label: string
   readonly turn: number | null
+  readonly anchorSeq: number | null
   readonly sessionId: string
   readonly depth: number
   readonly collapsed: boolean
@@ -293,6 +296,7 @@ export function layoutTree(view: BranchTreeView | null): TreeLayout {
       kind: node.kind,
       label: node.label,
       turn: node.turn,
+      anchorSeq: node.anchorSeq ?? null,
       sessionId: node.sessionId,
       depth,
       collapsed: node.collapsed,
@@ -453,6 +457,7 @@ export function layoutTree(view: BranchTreeView | null): TreeLayout {
         kind: item.kind,
         label: item.label,
         turn: item.turn,
+        anchorSeq: item.anchorSeq,
         sessionId: item.sessionId,
         depth: item.depth,
         collapsed: item.collapsed,

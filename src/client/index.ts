@@ -48,8 +48,10 @@ export { useCapabilityReport, type CapabilityReport } from './capability.ts'
 export { bundledCss, installPanelStyle, STYLE_MARKER } from './style.ts'
 export { branchApi } from './branch-api.ts'
 export type { BranchCreateValue, BranchTreeView } from './branch-api.ts'
-export { canOpenSession, installNavigation, openSessionById } from './navigation.ts'
+export { canOpenSession, installNavigation, loadSessionThrough, openSessionById } from './navigation.ts'
 export type { NavigationFace } from './navigation.ts'
+export { findTurnElement, FLASH_ATTRIBUTE, jumpToTurn } from './jump-to-turn.ts'
+export type { JumpHooks, JumpResult, JumpTarget } from './jump-to-turn.ts'
 export {
   isSessionNode,
   layoutTree,

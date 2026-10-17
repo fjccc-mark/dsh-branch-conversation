@@ -898,6 +898,95 @@ try {
     `点了之后既没提示也没开出来：notice=${JSON.stringify(heroAfter.notice)}`,
   )
 
+  // ---------------------------------------------------------------------------
+  // F-15：点主轴上的某一轮 → 对话应**滚到那一轮**，而不是停在末尾
+  // ---------------------------------------------------------------------------
+  console.log('\n=== F-15：点节点跳到对应轮次 ===')
+
+  // 重新开一条有历史的会话（F-12 之前把会话关掉了），再切回我们的页面。
+  const jumpRows = await evaluate(`(() => {
+    const rows = [...document.querySelectorAll('div[class*="_sessionRow"]')]
+    const withHistory = rows.filter((row) => row.querySelector('span[class*="_time"]') !== null)
+    if (withHistory.length === 0) return null
+    withHistory[0].click()
+    return (withHistory[0].textContent || '').trim().slice(0, 30)
+  })()`)
+  await new Promise((done) => setTimeout(done, CLICK_SETTLE_MS * 2))
+  await evaluate(`(() => {
+    const icon = document.querySelector('[data-dsh-panel-entry="branch-conversation"]')
+    if (icon === null) return false
+    ;(icon.closest('button,[role="button"],li,a') ?? icon).click()
+    return true
+  })()`)
+  await new Promise((done) => setTimeout(done, CLICK_SETTLE_MS * 2))
+
+  const jumpBefore = JSON.parse(
+    await evaluate(`JSON.stringify({
+      scroller: document.querySelector('[data-conversation-scroll]') !== null,
+      // 注意：此刻在插件页，对话可能被卸载；用节点数判断画布在不在。
+      nodes: document.querySelectorAll('[data-dsh-branch-node]').length
+    })`),
+  )
+  console.log(`      开会话：${JSON.stringify(jumpRows)}；画布节点 ${jumpBefore.nodes} 个`)
+
+  // 点**最小轮次**的节点（最容易"不在已加载窗口里"，正好顺带验 loadThrough）。
+  const jumpPicked = await evaluate(`(() => {
+    const boxes = [...document.querySelectorAll('[data-dsh-branch-node]')]
+    const withTurn = boxes
+      .map((el) => ({ el, text: (el.textContent || '').trim().replace(/\\s+/g, ' ') }))
+      .map((item) => {
+        const m = /第 (\\d+) 轮/.exec(item.text)
+        return { el: item.el, text: item.text, turn: m === null ? null : Number(m[1]) }
+      })
+      .filter((item) => item.turn !== null)
+    if (withTurn.length === 0) return null
+    const target = withTurn.reduce((a, b) => (a.turn <= b.turn ? a : b))
+    const title = target.el.querySelector('.dsh-branch-node-title')
+    if (title === null) return null
+    title.click()
+    return { turn: target.turn }
+  })()`)
+  console.log(`      点了节点：${JSON.stringify(jumpPicked)}`)
+
+  const jumpFlashed = await waitFor(
+    () => evaluate(`document.querySelectorAll('[data-dsh-branch-flash]').length > 0`),
+    20_000,
+  )
+  const jumpAfter = JSON.parse(
+    await evaluate(`JSON.stringify({
+      flashTurn: document.querySelector('[data-dsh-branch-flash]')?.getAttribute('data-chat-turn') ?? null,
+      flashVisible: (() => {
+        const flash = document.querySelector('[data-dsh-branch-flash]')
+        const scroller = document.querySelector('[data-conversation-scroll]')
+        if (flash === null || scroller === null) return null
+        const rect = flash.getBoundingClientRect()
+        const box = scroller.getBoundingClientRect()
+        return rect.top >= box.top - 4 && rect.top < box.bottom
+      })(),
+      scrollTop: document.querySelector('[data-conversation-scroll]')?.scrollTop ?? null,
+      scrollHeight: document.querySelector('[data-conversation-scroll]')?.scrollHeight ?? null,
+      clientHeight: document.querySelector('[data-conversation-scroll]')?.clientHeight ?? null,
+      pluginPages: document.querySelectorAll('[data-dsh-branch-view]').length
+    })`),
+  )
+  const atBottom =
+    jumpAfter.scrollTop !== null &&
+    jumpAfter.scrollHeight !== null &&
+    jumpAfter.clientHeight !== null &&
+    jumpAfter.scrollHeight - jumpAfter.clientHeight - jumpAfter.scrollTop < 40
+  console.log(
+    `      跳转后：高亮轮次=${jumpAfter.flashTurn}（可见=${jumpAfter.flashVisible}），scrollTop=${jumpAfter.scrollTop}/${jumpAfter.scrollHeight - jumpAfter.clientHeight}，插件页 ${jumpAfter.pluginPages} 个`,
+  )
+
+  check(
+    '**F-15**：点节点后对话真的定位到那一轮（`data-dsh-branch-flash` 打在该轮元素上）',
+    jumpFlashed === true && jumpAfter.flashTurn !== null && String(jumpAfter.flashTurn) === String(jumpPicked?.turn),
+    `flash=${JSON.stringify(jumpAfter.flashTurn)} picked=${JSON.stringify(jumpPicked)}`,
+  )
+  check('**F-15**：那一轮在视野内（不是滚到末尾）', jumpAfter.flashVisible === true, JSON.stringify(jumpAfter))
+  check('**F-15**：跳完后已切回对话视图（插件页不再占中央列）', jumpAfter.pluginPages === 0, `插件页 ${jumpAfter.pluginPages} 个`)
+  check('**F-15**：滚动位置离开了末尾', jumpAfter.scrollTop !== null && !atBottom, JSON.stringify(jumpAfter))
+
   const heroShot = resolve(OUT_DIR, 'real-machine-hero.png')
   const heroImage = await cdp.send('Page.captureScreenshot', { format: 'png' }, session)
   await writeFile(heroShot, Buffer.from(heroImage.data, 'base64'))

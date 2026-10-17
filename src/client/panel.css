@@ -521,3 +521,17 @@
   }
 }
 
+/**
+ * 「点节点跳到对应轮次」的落点高亮。
+ *
+ * 标记由 `jump-to-turn.ts` 打在**对话视图**里那一轮的代表元素上（`data-chat-turn`），
+ * 1.4 秒后撤掉。用 outline（不占布局）而不是背景色，避免把官方消息样式盖住；
+ * 颜色走主题 token（暗色主题下也不会是刺眼的白）。
+ */
+[data-dsh-branch-flash='true'] {
+  outline: 2px solid var(--dsw-alias-state-business-primary, rgba(77, 124, 255, 0.9));
+  outline-offset: 3px;
+  border-radius: 6px;
+  transition: outline-color 120ms ease-out;
+}
+
