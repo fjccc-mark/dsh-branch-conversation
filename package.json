@@ -22,6 +22,8 @@
     "./client": {
       "default": "./lib/client.js"
     },
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
     "./testing/fake-sessions": {
       "types": "./lib/testing/fake-sessions.d.ts",
       "default": "./lib/testing/fake-sessions.js"
@@ -36,6 +38,7 @@
     "lib/**/*.d.ts",
     "lib/**/*.d.ts.map",
     "src",
+    "locale",
     "cordis.patch.yml",
     "icon.svg",
     "README.md"
@@ -49,6 +52,8 @@
     },
     "client": {
       "inject": [
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
         "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-layout",
         "@deepseek-ai/dsh-client-ui-session",
@@ -65,7 +70,7 @@
     "typecheck:client": "tsc -b tsconfig.client.json --pretty false",
     "typecheck": "npm run typecheck:host && npm run typecheck:client",
     "build": "tsdown && node tools/build/wrap-client-bundle.mjs lib/client.js dsh-branch-conversation",
-    "smoke": "node tools/smoke/branch-smoke.mjs && node tools/smoke/branch-m1-cases.mjs && node tools/smoke/branch-m4-cases.mjs && node tools/smoke/client-bundle.mjs && node tools/smoke/tree-layout.mjs && node tools/smoke/export.mjs && node tools/smoke/view-state.mjs",
+    "smoke": "node tools/smoke/branch-smoke.mjs && node tools/smoke/branch-m1-cases.mjs && node tools/smoke/branch-m4-cases.mjs && node tools/smoke/client-bundle.mjs && node tools/smoke/tree-layout.mjs && node tools/smoke/export.mjs && node tools/smoke/view-state.mjs && node tools/smoke/right-sidebar.mjs",
     "layout-check": "node tools/smoke/layout-check.mjs",
     "layout-shots": "node tools/smoke/layout-check.mjs --shots",
     "real-machine": "node tools/smoke/real-machine.mjs",

@@ -14,12 +14,35 @@
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import { BRANCH_PANEL_ID } from '../core/types.ts'
 import { installNavigation, retryNavigation } from './navigation.ts'
-import { BranchPanelIcon, BranchPanelPage } from './panel.tsx'
+import { BranchCanvasView, BranchPanelIcon, BranchPanelPage } from './panel.tsx'
 import { installPanelStyle } from './style.ts'
+import {
+  openBranchTab,
+  installRightSidebar,
+  type LayoutFace,
+  type SidebarRightFace,
+  type SidebarRightTabsFace,
+  type SlotsFace,
+} from './right-sidebar.ts'
 import { installSessionsFace, retrySessionsFace, useMainViewSessionId, type ClientSessions } from './use-main-session.ts'
 
-export { BranchPanelIcon, BranchPanelPage } from './panel.tsx'
+export { BranchCanvasView, BranchPanelIcon, BranchPanelPage } from './panel.tsx'
 export type { BranchPanelProps } from './panel.tsx'
+export {
+  BRANCH_TAB_ID,
+  BRANCH_TAB_KIND,
+  branchTabDefinition,
+  canOpenBranchTab,
+  installRightSidebar,
+  openBranchTab,
+  unavailableReason,
+} from './right-sidebar.ts'
+export type {
+  InstallResult,
+  LayoutFace,
+  SidebarRightFace,
+  SidebarRightTabsFace,
+} from './right-sidebar.ts'
 export { useCapabilityReport, type CapabilityReport } from './capability.ts'
 export { bundledCss, installPanelStyle, STYLE_MARKER } from './style.ts'
 export { branchApi } from './branch-api.ts'
@@ -66,6 +89,120 @@ const PANEL_ORDER = 30
 
 /** 本地化命名空间（C6：先只写中文，结构留扩展位）。 */
 const LOCALE_NAMESPACE = 'branch-conversation'
+
+/**
+ * 右侧详情列的服务探测（M7）。
+ *
+ * 为什么在入口探测而不是只靠 `inject`：`inject` 保证的是"我们声明过的服务在 `apply` 之前就绪"，
+ * 但"这个部署到底有没有官方右侧详情列"是**部署相关**的事实（老版本、精简 profile 都可能没有）。
+ * 探测成 undefined 时我们**降级**：不注册右侧页签、把左侧按钮禁用并说明原因——绝不抛。
+ *
+ * 与 `sessions` / `uiWorkspace` 同款理由：未 inject 的服务属性访问会**抛错**而不是给 undefined，
+ * 所以统一走 `serviceOf`。
+ */
+const readRightSidebarTabs = (): SidebarRightTabsFace | undefined => {
+  const scope = activeScope
+  return scope === null ? undefined : serviceOf<SidebarRightTabsFace>(scope, 'sidebarRightTabs')
+}
+
+/** 读官方右侧栏的导航面（`openTab` 在这里）。 */
+const readRightSidebar = (): SidebarRightFace | undefined => {
+  const scope = activeScope
+  return scope === null ? undefined : serviceOf<SidebarRightFace>(scope, 'sidebarRight')
+}
+
+/**
+ * 读官方的面板选择面（`ctx.layout`）。
+ *
+ * M7 实测必需：我们的页面是**全局面板**，它占据中央列时官方右侧栏没有会话面，
+ * `openTab` 会抛。所以"在右侧打开"必须先 `selectPanel(null)` 切回对话。
+ */
+const readLayout = (): LayoutFace | undefined => {
+  const scope = activeScope
+  return scope === null ? undefined : serviceOf<LayoutFace>(scope, 'layout')
+}
+
+/**
+ * 记一条"右侧页签装上了"。
+ *
+ * 走 `__DSH_BRANCH__` 的诊断位（**不是** `failed`）：它是可选能力的附加信息，
+ * 真机复核脚本读这个字段就能判断"右侧栏在不在"，而不会把它误当成插件注册失败。
+ */
+function noteRightSidebarReady(): void {
+  try {
+    const scope = globalThis as unknown as {
+      __DSH_BRANCH__?: Record<string, unknown>
+    }
+    scope.__DSH_BRANCH__ = { ...(scope.__DSH_BRANCH__ ?? {}), rightSidebar: 'ready' }
+  } catch {
+    // 诊断写入失败不影响插件。
+  }
+}
+
+/**
+ * 记一条"右侧页签没装上（重试到头了）"。
+ *
+ * 注意与 {@link reportFailure} 的区别：**这不是失败**，只是这个部署没有右侧详情列。
+ * 早先版本把它写进同一个诊断位，结果真机复核的"插件注册成功"那条断言被误判为红——
+ * 诊断字段要能区分"插件坏了"和"可选能力不在"。
+ * @param reason - 可读原因。
+ */
+function noteRightSidebarSkipped(reason: string): void {
+  try {
+    const scope = globalThis as unknown as {
+      __DSH_BRANCH__?: Record<string, unknown>
+    }
+    scope.__DSH_BRANCH__ = { ...(scope.__DSH_BRANCH__ ?? {}), rightSidebar: `skipped: ${reason}` }
+  } catch {
+    // 诊断写入失败不影响插件。
+  }
+}
+
+/**
+ * 反复尝试安装右侧页签，直到装上或重试用尽（最多约 15 秒）。
+ *
+ * 为什么需要它（真机实测）：提供 `sidebarRightTabs` 的官方包**可能比我们晚激活**，
+ * 入口那一次探测会拿到 undefined；而"晚到"与"这个部署根本没有"从一次探测上分不开。
+ * 所以隔 500ms 重试，用尽后记一条可读原因（`skipped:`），**绝不抛、绝不影响左侧**。
+ *
+ * @param tryInstall - 返回 `true` 表示装上了（停止重试）。
+ * @param onGiveUp - 重试用尽时的回调（记诊断）。
+ * @returns 停止重试的函数。
+ */
+function retryRightSidebar(tryInstall: () => boolean, onGiveUp: (reason: string) => void): () => void {
+  let attempts = 0
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const stop = (): void => {
+    if (timer !== undefined) {
+      clearTimeout(timer)
+      timer = undefined
+    }
+  }
+  const tick = (): void => {
+    attempts += 1
+    if (tryInstall()) {
+      stop()
+      return
+    }
+    if (attempts >= 30) {
+      stop()
+      onGiveUp('等了约 15 秒仍没有 ctx.sidebarRightTabs（这个部署可能没有官方右侧详情列）')
+      return
+    }
+    timer = setTimeout(tick, 500)
+  }
+  stop()
+  timer = setTimeout(tick, 500)
+  return stop
+}
+
+/**
+ * 入口拿到的客户端上下文（模块级）。
+ *
+ * 页面组件拿不到 `ctx`，右侧服务又要在**渲染时**读（用户可能中途切会话），
+ * 所以在这里留一个只读引用——与 `use-main-session.ts` 里那套"模块级服务面"同一个理由。
+ */
+let activeScope: ClientScope | null = null
 
 /**
  * 本插件需要的客户端服务。
@@ -137,7 +274,7 @@ function reportFailure(detail: string): void {
   try {
     console.error(`[dsh-branch-conversation] apply 失败：\n${detail}`)
     const scope = globalThis as unknown as { __DSH_BRANCH__?: Record<string, unknown> }
-    scope.__DSH_BRANCH__ = { failed: true, detail, at: new Date().toISOString() }
+    scope.__DSH_BRANCH__ = { ...(scope.__DSH_BRANCH__ ?? {}), failed: true, detail, at: new Date().toISOString() }
   } catch {
     // 诊断失败不影响原始异常。
   }
@@ -146,6 +283,7 @@ function reportFailure(detail: string): void {
 /** 真正的入口逻辑；任何异常都由 {@link apply} 报告后重抛。 */
 function applyOrThrow(ctx: ClientContext): void {
   const scope = ctx as unknown as ClientScope
+  activeScope = scope
   // 样式先注入：即使后面座位注册失败（例如壳没有 slots），页面样式也已经就位。
   installPanelStyle()
   const slots = serviceOf<SlotFace>(scope, 'slots')
@@ -192,8 +330,28 @@ function applyOrThrow(ctx: ClientContext): void {
   )
 
   // 页面组件拿不到 ctx，因此用闭包 + 模块级会话面把"当前主视图会话"接进去。
-  const Page = (): ReturnType<typeof BranchPanelPage> =>
-    BranchPanelPage({ sessionId: useMainViewSessionId() })
+  //
+  // M7.2：这里同时把「在右侧打开」的能力接进去。注意 `useMainViewSessionId()` 是**钩子**，
+  // 只能在组件里调——所以包一层小组件（而不是在外面先算好再传）：右侧服务与当前会话
+  // 都要在渲染时读，才能随它们的变化重算 `disabled` 与说明文案。
+  const Page = (): ReturnType<typeof BranchPanelPage> => {
+    const sessionId = useMainViewSessionId()
+    const right = readRightSidebar()
+    return BranchPanelPage({
+      sessionId,
+      onOpenRight: () => {
+        // 先切回对话再开页签：官方右侧栏只在"会话占着中央列"时有会话面（见 openBranchTab 注释）。
+        openBranchTab(right, sessionId, readLayout())
+      },
+      // 空串 = 可用；否则是禁用原因（服务缺失 / 没有会话），直接进按钮的 title。
+      rightReason:
+        right === undefined
+          ? '这个部署没有官方右侧详情列（sidebarRight 服务不可用）'
+          : sessionId === null
+            ? '当前没有打开的会话：右侧详情列按会话存储，没有会话时无处可开'
+            : '',
+    })
+  }
 
   slots.inject(MAIN_SLOT, () =>
     slots.register(
@@ -205,6 +363,32 @@ function applyOrThrow(ctx: ClientContext): void {
       Page,
     ),
   )
+
+  // M7.1：把同一个画布挂进官方"右侧详情列"（web `Ctrl+Shift+B` / 桌面 `Ctrl+Alt+B` 那一栏）。
+  //
+  // ⚠️ 真机实测（2026-10-17）：这个服务**比我们晚**——入口跑的时候 `sidebarRightTabs` 还是 undefined，
+  // 而那时右侧栏其实已经能用了（用官方键位能打开）。所以不能只探一次：
+  // 拿不到就按既有套路（`retrySessionsFace` / `retryNavigation` 同款）隔 500ms 重试，最多约 15 秒，
+  // 拿到就立刻把两处注册装上。
+  // 不把它写进 `inject` 是**有意**的：那样在"没有右侧栏的部署"里我们会**整块不激活**——
+  // 左侧那套是主功能，绝不能因为一个可选能力没装成而一起消失。
+  const tryInstallRightSidebar = (): boolean => {
+    const install = installRightSidebar(
+      ctx,
+      { tabs: readRightSidebarTabs(), slots: slots as unknown as SlotsFace },
+      BranchCanvasView,
+      '分支对话',
+      '用流程图管理主对话的每一次问答、子对话与文件节点',
+    )
+    if (install.installed) noteRightSidebarReady()
+    return install.installed
+  }
+  if (!tryInstallRightSidebar()) {
+    retryRightSidebar(tryInstallRightSidebar, (reason) => noteRightSidebarSkipped(reason))
+  }
 }
 
-export default apply
+// ⚠️ **刻意没有 `export default apply`** —— 与宿主侧同一个理由（M7.0 修掉的根因）：
+// 加载器解包 `exports = exports.default ?? exports` 会因 `.default` 只留下裸函数，
+// 把同模块的 `inject` 丢掉（官方三个客户端产物都只有具名导出，没有 `.default`）。
+// 断言在 `tools/smoke/client-bundle.mjs`。

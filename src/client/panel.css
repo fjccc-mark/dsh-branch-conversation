@@ -8,6 +8,20 @@
  * 所以**每个横向排布都要能被压缩**——容器一律 `min-width: 0`（弹性子项默认最小宽度是内容宽，
  * 不加这行就会被长标题顶宽），文本项一律 `min-width: 0` + 截断（`text-overflow: ellipsis`），
  * 需要保留完整内容的地方交给 `title` 悬浮提示。宽度量测见 `tools/smoke/layout-check.mjs`。
+ *
+ * ## 颜色一律走官方主题 token（M7.0 整改）
+ *
+ * 官方插件红线的原话是"样式只用 `--dsw-alias-*` 主题 token，字面颜色只用于 artwork"。
+ * 这么做的收益很实在：token 改名最多让**外观**退化，**永远不会弄坏渲染**；而硬编码色
+ * 在换主题/暗色下就是一块补不回来的死色（本文件整改前有 3 处 hex + 18 处 rgba）。
+ *
+ * 用到的 token 都是从官方客户端产物里统计出来的**真实名字**（不是猜的）：
+ *   `label-primary` / `label-secondary` / `state-warn-primary` / `state-success-primary`
+ *   `border-l1`…`border-l4` / `fill-l1` / `fill-l2` / `bg-layer-1` / `bg-layer-2` / `tooltip-bg`
+ *   `state-business-primary`（链接/主色语义）/ `interactive-bg-hover`
+ *
+ * 少数**语义固定**的图形色（主轴蓝、分支琥珀）也走 `state-business-primary` / `state-warn-primary`，
+ * 这样它们仍能表达"继续 vs 岔开"的语义，同时跟随主题。
  */
 
 .dsh-branch-page {
@@ -88,7 +102,7 @@
   margin: 0;
   font-size: 12.5px;
   line-height: 1.7;
-  color: #d97706;
+  color: var(--dsw-alias-state-warn-primary, #d97706);
 }
 
 .dsh-branch-placeholder {
@@ -129,7 +143,7 @@
   font: inherit;
   font-size: 12.5px;
   padding: 6px 8px;
-  border: 1px solid rgba(128, 128, 128, 0.4);
+  border: 1px solid var(--dsw-alias-border-l3, rgba(128, 128, 128, 0.4));
   border-radius: 6px;
   background: transparent;
   color: inherit;
@@ -149,15 +163,15 @@
   font: inherit;
   font-size: 12.5px;
   padding: 6px 12px;
-  border: 1px solid rgba(128, 128, 128, 0.4);
+  border: 1px solid var(--dsw-alias-border-l3, rgba(128, 128, 128, 0.4));
   border-radius: 6px;
-  background: rgba(128, 128, 128, 0.12);
+  background: var(--dsw-alias-fill-l1, rgba(128, 128, 128, 0.12));
   color: inherit;
   cursor: pointer;
 }
 
 .dsh-branch-button:hover:not(:disabled) {
-  background: rgba(128, 128, 128, 0.2);
+  background: var(--dsw-alias-interactive-bg-hover, rgba(128, 128, 128, 0.2));
 }
 
 .dsh-branch-button:disabled {
@@ -169,7 +183,7 @@
   margin: 8px 0 0;
   font-size: 12.5px;
   line-height: 1.7;
-  color: #16a34a;
+  color: var(--dsw-alias-state-success-primary, #16a34a);
 }
 
 /* --- 流程图：画布 = 节点框 + 连线（Visio 式，2026-10-15 口径） ---
@@ -209,11 +223,13 @@
   max-width: 100%;
   min-width: 0;
   overflow: auto;
-  border: 1px solid rgba(128, 128, 128, 0.28);
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.28));
   border-radius: 10px;
-  background-color: rgba(128, 128, 128, 0.04);
-  /* 点状网格：给"这是画布而不是列表"的观感（不影响几何量测）。 */
-  background-image: radial-gradient(rgba(128, 128, 128, 0.22) 1px, transparent 1px);
+  background-color: var(--dsw-alias-bg-layer-1, rgba(128, 128, 128, 0.04));
+  /* 点状网格：给"这是画布而不是列表"的观感（不影响几何量测）。
+     网格点用 `currentColor` + `color-mix` 而不是写死灰色：这样**跟随主题**，
+     暗色下不会变成一层突兀的亮点。 */
+  background-image: radial-gradient(color-mix(in srgb, currentColor 22%, transparent) 1px, transparent 1px);
   background-size: 18px 18px;
   overscroll-behavior: contain;
 }
@@ -243,12 +259,12 @@
 
 /* 主轴（同一会话相邻轮次）= 实线，B10 的"轴线" */
 .dsh-branch-wire-main {
-  stroke: rgba(120, 170, 255, 0.85);
+  stroke: var(--dsw-alias-state-business-primary, rgba(120, 170, 255, 0.85));
 }
 
 /* 分支（跨会话 / 文件节点）= 虚线，一眼能分开"继续"与"岔开" */
 .dsh-branch-wire-branch {
-  stroke: rgba(200, 160, 90, 0.9);
+  stroke: var(--dsw-alias-state-warn-primary, rgba(200, 160, 90, 0.9));
   stroke-dasharray: 5 3;
 }
 
@@ -260,9 +276,11 @@
   gap: 3px;
   padding: 6px 8px;
   /* 固定的框：宽高由 `layoutTree` 决定（内联），这里只保证"看得见边框"。 */
-  border: 1px solid rgba(128, 128, 128, 0.5);
+  border: 1px solid var(--dsw-alias-border-l4, rgba(128, 128, 128, 0.5));
   border-radius: 8px;
-  background: rgba(28, 30, 36, 0.94);
+  /* 原来写死 `rgba(28,30,36,.94)`：暗色下"碰巧"能看，亮色下就是一坨黑块。
+     改用层级背景 token，两种主题都正确。 */
+  background: var(--dsw-alias-bg-layer-2, rgba(28, 30, 36, 0.94));
   color: inherit;
   overflow: hidden;
   font-size: 12px;
@@ -270,8 +288,8 @@
 }
 
 .dsh-branch-node-current {
-  border-color: rgba(120, 170, 255, 0.95);
-  box-shadow: 0 0 0 1px rgba(120, 170, 255, 0.45);
+  border-color: var(--dsw-alias-state-business-primary, rgba(120, 170, 255, 0.95));
+  box-shadow: 0 0 0 1px var(--dsw-alias-state-business-tertiary, rgba(120, 170, 255, 0.45));
 }
 
 .dsh-branch-node-orphan {
@@ -280,7 +298,7 @@
 }
 
 .dsh-branch-node-missing {
-  border-color: rgba(217, 119, 6, 0.9);
+  border-color: var(--dsw-alias-state-warn-primary, rgba(217, 119, 6, 0.9));
 }
 
 .dsh-branch-node-top {
@@ -303,14 +321,14 @@
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: rgba(120, 170, 255, 0.9);
+  background: var(--dsw-alias-state-business-primary, rgba(120, 170, 255, 0.9));
 }
 
 .dsh-branch-node-meta {
   flex: 1 1 auto;
   min-width: 0;
   font-size: 10px;
-  color: #d97706;
+  color: var(--dsw-alias-state-warn-primary, #d97706);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -322,7 +340,7 @@
   font-size: 11px;
   line-height: 1;
   padding: 2px 5px;
-  border: 1px solid rgba(128, 128, 128, 0.35);
+  border: 1px solid var(--dsw-alias-border-l3, rgba(128, 128, 128, 0.35));
   border-radius: 5px;
   background: transparent;
   color: inherit;
@@ -336,7 +354,7 @@
 
 .dsh-branch-node-handle:hover,
 .dsh-branch-node-plus:hover {
-  background: rgba(128, 128, 128, 0.2);
+  background: var(--dsw-alias-interactive-bg-hover, rgba(128, 128, 128, 0.2));
 }
 
 .dsh-branch-node-title {
@@ -376,7 +394,7 @@
 .dsh-branch-node-title:focus-visible,
 .dsh-branch-node-handle:focus-visible,
 .dsh-branch-node-plus:focus-visible {
-  outline: 2px solid rgba(120, 170, 255, 0.9);
+  outline: 2px solid var(--dsw-alias-state-business-primary, rgba(120, 170, 255, 0.9));
   outline-offset: 1px;
 }
 
@@ -398,6 +416,39 @@
  * 注意：`container-type: inline-size` 的元素**不能**用 `@container` 查询来修饰自己
  * （只能修饰后代），所以 `.dsh-branch-page` 自身的内边距不在这里改。
  */
+/* --- 右侧详情列里的画布外壳（M7） ---
+ *
+ * 与中央列页面（`.dsh-branch-page`）的区别只有布局意图：
+ *   - 页面是"一叠内容块 + 20px 留白"，画布高度 `62vh` 有上限；
+ *   - 右侧栏是一根**很窄的列**（默认 320~420px），纵向空间比横向值钱，
+ *     所以这里让画布**撑满可用高度**，并且不留页面级大留白。
+ * 颜色与框/线样式**完全复用**上面的画布规则（不复制一份，避免两处漂移）。
+ */
+.dsh-branch-canvas-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  height: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  overflow-y: auto;
+}
+
+/* 让这个外壳里的画布吃掉剩余高度（覆盖 `.dsh-branch-canvas` 的 `62vh` 上限）。 */
+.dsh-branch-canvas-pane > .dsh-branch-canvas {
+  flex: 1 1 auto;
+  height: auto;
+  max-height: none;
+  min-height: 180px;
+}
+
+/* 工具条里的弹性占位：把右侧按钮推到行尾。 */
+.dsh-branch-spacer {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .dsh-branch-page {
   container-type: inline-size;
   container-name: branch-page;

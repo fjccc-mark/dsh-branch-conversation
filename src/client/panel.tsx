@@ -70,11 +70,21 @@ const cls = {
   nodePlus: 'dsh-branch-node-plus',
   nodeCount: 'dsh-branch-node-count',
   empty: 'dsh-branch-empty',
+  /** 右侧详情列页签用的画布外壳（撑满容器、无页面级留白）。 */
+  canvasPane: 'dsh-branch-canvas-pane',
+  spacer: 'dsh-branch-spacer',
 } as const
 
 /** 页面入参：主视图当前会话 id（由客户端入口按会话目录快照传入，可为空）。 */
 export interface BranchPanelProps {
   readonly sessionId?: string | null
+  /**
+   * M7.2：点「在右侧打开」时的回调（由客户端入口接到右侧服务上）。
+   * 不传就不显示这个能力（按钮禁用并说明），这样左侧页面在没有右侧栏的部署里也不报错。
+   */
+  readonly onOpenRight?: (() => void) | undefined
+  /** 按钮不可用时的可读原因；空串表示可用。 */
+  readonly rightReason?: string
 }
 
 /** 侧边栏行图标：官方 shell 给尺寸与选中态，本组件只画图形。 */
@@ -103,13 +113,42 @@ export function BranchPanelIcon({ size }: { size: number; active: boolean }): Re
 }
 
 /** 中央列页面：分支树的画布（节点框 + 连线）。 */
-export function BranchPanelPage({ sessionId = null }: BranchPanelProps = {}): ReactNode {
-  const { report, error, pending } = useCapabilityReport()
+/**
+ * 画布的**公共状态与行为**（左侧页面与右侧页签共用）。
+ *
+ * 为什么抽出来：M7 要把同一个画布挂到官方右侧详情列，但**绝不允许复制一份渲染/交互逻辑**
+ * （两份实现必然漂移：今天改了折叠语义、明天改了自动适配，总有一边忘了跟）。
+ * 所以把"取树 → 布局 → 缩放 → 滚动位置 → 三个动作"收进这一个 hook，
+ * 左侧页面与右侧页签各自只负责自己的外壳（工具条 / 自检 / 建分支表单）。
+ *
+ * 刻意**不含**页面专属的东西：能力自检（`useCapabilityReport`）、建分支表单、导出按钮——
+ * 那些是"页面"而不是"画布"的职责，留在 `BranchPanelPage` 里。
+ *
+ * @param sessionId - 要显示哪个会话的树；`null` 表示没有会话（画布降级为空）。
+ * @returns 布局、缩放、滚动容器 ref 与交互回调。
+ */
+export function useBranchCanvasState(sessionId: string | null): {
+  tree: BranchTreeView | null
+  layout: TreeLayout
+  zoom: number
+  viewportRef: RefObject<HTMLDivElement>
+  pageRef: RefObject<HTMLDivElement>
+  failure: string | null
+  status: string | null
+  setFailure: (value: string | null) => void
+  setStatus: (value: string | null) => void
+  refresh: (target: string | null) => Promise<void>
+  applyZoom: (next: number) => void
+  onWheel: (event: WheelEvent<HTMLDivElement>) => void
+  onOpenSession: (target: string) => void
+  onOpenFile: (box: TreeBox) => Promise<void>
+  onToggle: (box: TreeBox) => Promise<void>
+} {
   const [tree, setTree] = useState<BranchTreeView | null>(null)
   const [status, setStatus] = useState<string | null>(null)
   const [failure, setFailure] = useState<string | null>(null)
-  const [branchFrom, setBranchFrom] = useState<TreeBox | null>(null)
   // 缩放取自**模块级视图状态**：官方 shell 切面板会卸载本页，`useState` 活不过去（F-6 实测）。
+  // 左右两侧共用同一份视图状态：切座位时缩放/滚动不丢（F-10 也据此断言"左页状态不丢"）。
   const [zoom, setZoom] = useState(() => readViewState().zoom)
   const viewportRef = useRef<HTMLDivElement | null>(null)
   const pageRef = useRef<HTMLDivElement | null>(null)
@@ -131,23 +170,13 @@ export function BranchPanelPage({ sessionId = null }: BranchPanelProps = {}): Re
     setStatus(`这个会话还没有分支树（${result.error.code}）：${result.error.message}`)
   }, [])
 
-  // 主视图会话变化时自动读取它的树。
+  // 会话变化时自动读取它的树。
   useEffect(() => {
     void refresh(sessionId)
   }, [sessionId, refresh])
 
   const layout = layoutTree(tree)
 
-  /**
-   * 首次拿到一张非空画布时**自动缩小到适配宽度**（窄屏 F-5：不退化，只是字号与显示量收敛）。
-   *
-   * 为什么只在首次做：用户一旦自己缩放（或点了 100%），后续刷新不该把他的缩放改回去。
-   * 这个"是否已定下来"记在**模块级视图状态**里而不是 ref 里——切面板会卸载重挂，
-   * ref 会重置，用 ref 的话每次切回来都会被自动适配改一次缩放（F-6 实测就是这个）。
-   *
-   * 注意 `applyZoom` 必须在下面声明之后再被"调用"：`useLayoutEffect` 的**回调**是挂载后才跑的，
-   * 所以这里把 effect 放在 `applyZoom` 定义**之后**（否则 TS 会报"变量在声明前使用"）。
-   */
   const onOpenFile = useCallback(async (box: TreeBox) => {
     const result = await branchApi.openFile(box.id)
     setFailure(result.ok ? null : `${result.error.code}：${result.error.message}`)
@@ -182,8 +211,7 @@ export function BranchPanelPage({ sessionId = null }: BranchPanelProps = {}): Re
     [],
   )
 
-  /** 缩放：夹在 30%~200%，按 5% 取整便于断言与阅读；同时记进模块级视图状态。 */
-  /** 缩放：夹在 30%~200%，按 5% 取整便于断言与阅读；同时记进模块级视图状态。 */
+  /** 缩放：夹在 30%~200%，取整到 1% 便于断言与阅读；同时记进模块级视图状态。 */
   const applyZoom = useCallback((next: number) => {
     const clamped = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, next))
     const rounded = Math.round(clamped * 100) / 100
@@ -254,6 +282,50 @@ export function BranchPanelPage({ sessionId = null }: BranchPanelProps = {}): Re
     },
     [applyZoom, zoom],
   )
+
+  return {
+    tree,
+    layout,
+    zoom,
+    viewportRef,
+    pageRef,
+    failure,
+    status,
+    setFailure,
+    setStatus,
+    refresh,
+    applyZoom,
+    onWheel,
+    onOpenSession,
+    onOpenFile,
+    onToggle,
+  }
+}
+
+export function BranchPanelPage({
+  sessionId = null,
+  onOpenRight,
+  rightReason = '这个部署没有官方右侧详情列（sidebarRight 服务不可用）',
+}: BranchPanelProps = {}): ReactNode {
+  const { report, error, pending } = useCapabilityReport()
+  const [branchFrom, setBranchFrom] = useState<TreeBox | null>(null)
+  const {
+    tree,
+    layout,
+    zoom,
+    viewportRef,
+    pageRef,
+    failure,
+    status,
+    setFailure,
+    setStatus,
+    refresh,
+    applyZoom,
+    onWheel,
+    onOpenSession,
+    onOpenFile,
+    onToggle,
+  } = useBranchCanvasState(sessionId)
 
   /** 导出：拿到内容后在浏览器侧落成文件（不依赖宿主写盘权限）。 */
   const onExport = useCallback(
@@ -371,6 +443,21 @@ export function BranchPanelPage({ sessionId = null }: BranchPanelProps = {}): Re
               </button>
             ))
           : null}
+        {/* M7.2：把同一个画布在官方右侧详情列里打开。
+            不可用时**禁用并在 title 里说清原因**（而不是"点了没反应"）——官方在没有会话时
+            `openTab` 会抛，所以这里必须由调进来的状态先拦一道。 */}
+        <button
+          type="button"
+          className={cls.button}
+          data-dsh-branch-open-right=""
+          disabled={rightReason !== ''}
+          title={rightReason === '' ? '在官方右侧详情列里打开这个画布' : rightReason}
+          onClick={() => {
+            onOpenRight?.()
+          }}
+        >
+          在右侧打开
+        </button>
         {layout.hasOrphans ? (
           <button
             type="button"
@@ -499,8 +586,7 @@ function BranchCanvas({
   onOpenFile: (box: TreeBox) => void
   onToggle: (box: TreeBox) => void
   onBranch: (box: TreeBox) => void
-}): ReactNode {
-  return (
+}): ReactNode {  return (
     <div
       className={cls.canvas}
       ref={viewportRef}
@@ -548,6 +634,124 @@ function BranchCanvas({
           />
         ))}
       </div>
+    </div>
+  )
+}
+
+/**
+ * 一个"只含画布"的视图（M7：右侧详情列的页签内容）。
+ *
+ * 与左侧 `BranchPanelPage` 的关系：**共用** `useBranchCanvasState`（取树/布局/缩放/滚动/动作）
+ * 与 `BranchCanvas`/`NodeBox`（渲染），只是**外壳不同**——这里只有一块画布，
+ * 没有工具条的导出/刷新/自检，也没有建分支表单（那些属于"页面"）。
+ *
+ * 右侧栏比中央列窄得多（默认约 320~420px），所以：
+ *   - 画布高度改成**撑满容器**（而不是页面那种 `62vh`），窄栏里纵向空间更值钱；
+ *   - 点「＋」建分支时，直接给一句话提示引导用户回左侧页面填表
+ *     （表单在窄栏里根本铺不开，而且"建分支"是一次性动作，不值得在两处各放一份 UI）。
+ *
+ * @param props.sessionId - 该页签所属会话（框架按 session 作用域给出）。
+ * @param props.onRequestPage - 可选：请求官方把中央列切回本插件的页面（用于"去左侧建分支"）。
+ */
+export function BranchCanvasView({
+  sessionId = null,
+  onRequestPage,
+}: {
+  sessionId?: string | null
+  onRequestPage?: () => void
+}): ReactNode {
+  const [notice, setNotice] = useState<string | null>(null)
+  const {
+    layout,
+    zoom,
+    viewportRef,
+    pageRef,
+    failure,
+    status,
+    refresh,
+    applyZoom,
+    onWheel,
+    onOpenSession,
+    onOpenFile,
+    onToggle,
+  } = useBranchCanvasState(sessionId)
+
+  const onBranch = useCallback(() => {
+    setNotice('建分支请到左侧「分支对话」页面操作（这里窄，填不下表单）')
+    onRequestPage?.()
+  }, [onRequestPage])
+
+  return (
+    <div className={cls.canvasPane} ref={pageRef} data-dsh-branch-sidebar-view="">
+      <div className={cls.toolbar}>
+        <button
+          type="button"
+          className={cls.button}
+          disabled={sessionId === null}
+          onClick={() => {
+            void refresh(sessionId)
+          }}
+        >
+          刷新
+        </button>
+        <button
+          type="button"
+          className={cls.button}
+          title="缩小画布"
+          aria-label="缩小画布"
+          disabled={zoom <= ZOOM_MIN}
+          onClick={() => {
+            applyZoom(zoom / ZOOM_STEP)
+          }}
+        >
+          −
+        </button>
+        <span className={cls.muted} data-dsh-branch-zoom={String(Math.round(zoom * 100))}>
+          {Math.round(zoom * 100)}%
+        </span>
+        <button
+          type="button"
+          className={cls.button}
+          title="放大画布"
+          aria-label="放大画布"
+          disabled={zoom >= ZOOM_MAX}
+          onClick={() => {
+            applyZoom(zoom * ZOOM_STEP)
+          }}
+        >
+          ＋
+        </button>
+        <button
+          type="button"
+          className={cls.button}
+          title="缩放到 100%"
+          onClick={() => {
+            applyZoom(1)
+          }}
+        >
+          100%
+        </button>
+        <span className={cls.spacer} />
+      </div>
+
+      {failure !== null ? <p className={cls.warn}>{failure}</p> : null}
+      {notice !== null ? <p className={cls.muted}>{notice}</p> : null}
+      {layout.nodes.length === 0 ? (
+        <p className={cls.empty} data-dsh-branch-empty="">
+          {status ?? (sessionId === null ? '这个部署还没有可显示的会话' : '这个会话还没有节点')}
+        </p>
+      ) : (
+        <BranchCanvas
+          layout={layout}
+          zoom={zoom}
+          viewportRef={viewportRef}
+          onWheel={onWheel}
+          onOpenSession={onOpenSession}
+          onOpenFile={onOpenFile}
+          onToggle={onToggle}
+          onBranch={onBranch}
+        />
+      )}
     </div>
   )
 }

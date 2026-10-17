@@ -20,7 +20,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const root = resolve(here, '..', '..')
@@ -36,6 +36,23 @@ const track = (name, fn) =>
   )
 
 const source = await readFile(bundlePath, 'utf8')
+const hostSource = await readFile(resolve(root, 'lib/index.js'), 'utf8')
+
+/**
+ * 模块导出的"解包后"形状：加载器会做 `exports = exports.default ?? exports`，
+ * 所以一旦产物里存在 `.default`，同模块的 `inject` / `Config` / `name` 就会被丢掉。
+ *
+ * ⚠️ 判据要**精确**：早先我用宽泛的 `.default` 正则，被 `exports.DEFAULT_VIEW_STATE` 里的
+ * `DEFAULT` 误伤；后来用 `default:` 又被 `switch` 的 case 标签误伤（两次假红）。
+ * 所以这里只认两种**真正的导出写法**：
+ *   ① CJS 赋值 `exports.default = …`（前面必须是 `.` 或词边界，避免撞上 `DEFAULT_*`）；
+ *   ② ESM 重命名导出 `as default`。
+ * 最可靠的判据仍是"模块命名空间里有没有 default"——由下面那条动态断言负责。
+ * @param {string} text - 产物源码。
+ * @returns {boolean} 是否存在真正的 default 导出。
+ */
+const hasDefaultExport = (text) =>
+  /[.\s{,;]default\s*=/.test(text) || /\bas\s+default\b/.test(text)
 
 // 页面组件在渲染时会发一次诊断请求；给它一个假 fetch，别让 Node 的真 fetch
 // 因为拿到空 URL 而抛错、把冒烟进程的退出码弄脏（见 fakeFetch 的注释）。
@@ -194,6 +211,37 @@ track('导出形状：apply 是函数，inject 含 slots', () => {
   assert.equal(typeof exports.apply, 'function', 'apply 不是函数')
   assert.ok(Array.isArray(exports.inject), 'inject 不是数组')
   assert.ok(exports.inject.includes('slots'), `inject 不含 slots：${JSON.stringify(exports.inject)}`)
+})
+
+track('**不得混用 export default**：产物没有 .default（否则 loader 解包会丢掉 inject/Config/name）', () => {
+  // 官方契约（dsh-plugin-guide §3.1）：导出形态"不要混用"。
+  // 加载器会做 `exports = exports.default ?? exports`：一旦有 `.default`，
+  // 解包结果就是裸 apply 函数，同模块的 inject / Config / name 全部丢失。
+  // 对照：官方 ui-sidebar-right / ui-deliverables / ui-sidebar-documentpreview 的客户端产物
+  // 尾部只有 `exports.apply` 与 `exports.inject`，没有 `.default`。
+  assert.equal(
+    hasDefaultExport(source),
+    false,
+    'lib/client.js 里出现了 default 导出：会让 inject 失效（应与官方一样只用具名导出）',
+  )
+  assert.equal(
+    hasDefaultExport(hostSource),
+    false,
+    'lib/index.js 里出现了 default 导出：会让 inject/Config/name 失效（应与官方一样只用具名导出）',
+  )
+  // 具名导出必须都还在（去掉 default 不能顺手把接口删了）。
+  assert.ok(/exports\.apply\s*=/.test(source), 'lib/client.js 丢了具名 apply 导出')
+  assert.ok(/exports\.inject\s*=/.test(source), 'lib/client.js 丢了具名 inject 导出')
+  assert.ok(/\bappl?y\b/.test(hostSource), 'lib/index.js 丢了 apply')
+})
+
+track('宿主半的导出面真的生效：import 后能看到 inject / name / Config（解包后不是裸函数）', async () => {
+  // 静态断言只证明"产物里没有 default"，这条动态断言证明"加载器解包后拿到的是带 inject 的对象"。
+  const mod = await import(pathToFileURL(resolve(root, 'lib/index.js')).href)
+  assert.equal(mod.default, undefined, 'lib/index.js 仍有 default 导出')
+  assert.deepEqual(mod.inject, ['webServer'], `inject 不对：${JSON.stringify(mod.inject)}`)
+  assert.equal(mod.name, 'branch-conversation', `name 不对：${mod.name}`)
+  assert.equal(typeof mod.Config, 'function', 'Config（Schemastery schema）没有导出')
 })
 
 track('只 require 模块表里的平台模块（没有越界依赖）', () => {

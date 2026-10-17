@@ -249,4 +249,17 @@ function defaultStorageRoot(): string {
   return join(base, 'storages', 'branch-conversation', 'v1')
 }
 
-export default apply
+// ⚠️ **这里刻意没有 `export default apply`**（M7.0 修掉的根因）。
+//
+// 官方插件契约（`dsh-plugin-guide` §3.1）写着"导出形态**不要混用**"：
+// 要么 `export function apply` + `export const inject` + `export const Config`，
+// 要么一个 service class 当 default export。
+//
+// 原因（产物层可复核）：加载器拿到模块命名空间后会做一次解包
+// `exports = exports.default ?? exports`。一旦存在 `.default`，解包结果就是那个**裸的 apply 函数**，
+// 于是同模块的 `inject` / `Config` / `name` **全部丢失**——本仓库曾因此让 `inject` 从未生效，
+// 只能靠鸭子类型 + 轮询去兜服务晚到（`withDefaults()` 与各处 `retry*` 的历史包袱）。
+//
+// 对照：官方 `dsh-client-ui-sidebar-right` / `ui-deliverables` / `ui-sidebar-documentpreview` 的
+// 客户端产物尾部**只有** `exports.apply = apply; exports.inject = inject;`，没有 `.default`。
+// `tools/smoke/client-bundle.mjs` 有一条断言钉死"产物里不得再出现 .default"。

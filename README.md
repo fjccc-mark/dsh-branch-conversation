@@ -1,4 +1,4 @@
-# 分支对话插件（dsh-branch-conversation）
+﻿# 分支对话插件（dsh-branch-conversation）
 
 DeepSeek Harness（DSH）插件：在官方侧边栏中新增一个**「分支对话」可切换页**，用流程图管理
 「主对话节点 → 子对话 / 文件节点」的树形结构。
@@ -104,10 +104,10 @@ DeepSeek Harness（DSH）插件：在官方侧边栏中新增一个**「分支�
 - **布局纯函数**：`layoutTree` 输出 `{ nodes(矩形) , edges(端点+path+axis) , size, hiddenTotal, hasOrphans }`；
   算法是经典紧凑树（叶子按序占槽位、父节点居中于首末子节点）→ 子树占连续槽段、天然不重叠。
 - **防退化**：`layout-check` 断言"画布内不得再出现 `│├└─` 轨道字符"（`railChars === 0`），谁把形态退回缩进列表就会红。
-- **几何证据（本轮已跑）**：`npm run smoke` **94/94**，其中画布布局套件 **20/20** 断言"主轴向下 / 分支向右 / 端点贴框 / 框零重叠 / 折叠连带隐藏 /
+- **几何证据（本轮已跑）**：`npm run smoke` **107/107**，其中画布布局套件 **20/20** 断言"主轴向下 / 分支向右 / 端点贴框 / 框零重叠 / 折叠连带隐藏 /
   顶点贴框 / `axis` 分类 / 12 层主轴只占一列"；`npm run layout-shots`
   在真实无头 Edge 上 **88/88 通过**（五档 × 展开/折叠两态）+ 10 张两态截图，目视确认"框 + 连线"成立。
-- 冒烟增至 **94 项**（画布布局整体重写 + 5 条主轴串接用例；新增 `view-state.mjs` 7 条：缩放/滚动跨面板切换存活）。
+- 冒烟增至 **107 项**（画布布局重写 + 主轴串接；`view-state.mjs` 7 条：缩放/滚动跨面板切换存活；`right-sidebar.mjs` 11 条：右侧详情列契约与降级）。
 - **真机形态门 F-1~F-7 全绿**：`npm run real-machine`（headless 打开真实 DSH）验侧边栏行、中央列画布、
   切面板来回状态保持、形态反例回归；`npm run served-bundle` 验宿主发布的产物已是新形态。
 - 验收口径：`F-3`/`F-4`/`F-8`（见 [docs/分支对话插件·测试计划.md](docs/分支对话插件·测试计划.md) §0.5），
@@ -161,7 +161,7 @@ dsh --profile branch-dev
 npm install --legacy-peer-deps         # 官方 SDK 的 peer 声明在 npm 下需要这个开关
 npm run typecheck                      # host + client 两个 program
 npm run build                          # tsdown（host ESM + client CJS）+ 套加载器外壳 + 内嵌 panel.css
-npm run smoke                          # 七套冒烟（94 项）：M0 14 + M1 14 + M4 15 + 产物 11 + 画布布局 20 + 导出 13 + 视图状态 7
+npm run smoke                          # 八套冒烟（107 项）：M0 14 + M1 14 + M4 15 + 产物 13 + 画布布局 20 + 导出 13 + 视图状态 7 + 右侧栏 11
 npm run layout-check                   # 画布形态量测：无头 Chromium 实量五档布局宽 × 展开/折叠两态（88 项）
 npm run layout-shots                   # 同上 + 两态共 10 张验收截图到 artifacts/panel-preview/（截图走 CDP）
 npm run preview                        # 打开早期静态预览页（排版目视；正式量测用 layout-check）
@@ -244,3 +244,4 @@ tools/
 ## 许可
 
 MIT
+
