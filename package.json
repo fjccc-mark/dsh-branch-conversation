@@ -1,8 +1,25 @@
 {
   "name": "dsh-branch-conversation",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
   "description": "DeepSeek Harness 插件：在官方侧边栏中新增一个「分支对话」页，用流程图管理主对话节点、子对话与文件节点。子对话不继承上下文，只继承模型人设与权限。",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "branch-conversation",
+    "flowchart",
+    "conversation-tree",
+    "cordis"
+  ],
+  "homepage": "https://github.com/fjccc-mark/dsh-branch-conversation#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fjccc-mark/dsh-branch-conversation.git"
+  },
+  "bugs": {
+    "url": "https://github.com/fjccc-mark/dsh-branch-conversation/issues"
+  },
+  "author": "fjccc-mark",
   "type": "module",
   "icon": "icon.svg",
   "engines": {
@@ -70,6 +87,7 @@
     "typecheck:client": "tsc -b tsconfig.client.json --pretty false",
     "typecheck": "npm run typecheck:host && npm run typecheck:client",
     "build": "tsdown && node tools/build/wrap-client-bundle.mjs lib/client.js dsh-branch-conversation",
+    "prepublishOnly": "npm run build",
     "smoke": "node tools/smoke/branch-smoke.mjs && node tools/smoke/branch-m1-cases.mjs && node tools/smoke/branch-m4-cases.mjs && node tools/smoke/client-bundle.mjs && node tools/smoke/tree-layout.mjs && node tools/smoke/export.mjs && node tools/smoke/export-download.mjs && node tools/smoke/view-state.mjs && node tools/smoke/right-sidebar.mjs && node tools/smoke/jump-to-turn.mjs",
     "layout-check": "node tools/smoke/layout-check.mjs",
     "layout-shots": "node tools/smoke/layout-check.mjs --shots",
