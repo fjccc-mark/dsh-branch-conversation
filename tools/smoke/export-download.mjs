@@ -1,11 +1,11 @@
 /**
- * 导出下载冒烟：**桌面端为什么优先走 GET 下载地址**（2026-10-17，桌面端适配轮）。
+ * 导出下载冒烟：桌面端的下载形状（2026-10-17，桌面端适配轮）。
  *
- * 现场：DSH 桌面端（Electron）里点「导出」，Downloads 里先出现一个 `<uuid>.tmp`，
- * 内容写全了，但**约二十秒后**才改名成 `.json`（网页端直接落最终名）。
- * Blob 路径点完立刻 `revokeObjectURL`，正好卡在下载收尾之前，所以改成两条路径分开测：
- *   ① `downloadExport()`：用 host 的 GET 路由（`branch/export?sessionId=…&format=…`）
- *      直接给 `<a download>`，由浏览器/Electron 的下载管理器收尾；
+ * 现场（桌面端 Electron 实测）：点导出后 Downloads 里先落一个 `<uuid>.tmp`（内容已写全），
+ * 几秒后才改名成目标文件——Blob 路径约 23 秒、GET 路径约 6 秒（各一次采样）。
+ * 也就是说 `.tmp` 是**桌面下载管线的中间态**，不是插件写坏的。代码因此按两条路径分别钉住：
+ *   ① `downloadExport()`：走 host 的 GET 路由（`branch/export?sessionId=…&format=…`），
+ *      用 `<a download>` 交给下载管理器收尾（host 侧本来就有 `content-disposition`）；
  *   ② `saveTextFile()`：兜底路径，**不许同步 revoke**（要延迟），且锚点要挂进文档再点。
  *
  * 客户端产物给浏览器模块表用，所以这里与 `tree-layout.mjs` / `jump-to-turn.mjs` 同款：
@@ -127,7 +127,7 @@ track('downloadExport：没有 document 时返回 false（调用方退回 Blob�
   }
 })
 
-track('saveTextFile：不许同步 revokeObjectURL（桌面端 .tmp 停留的根因）', () => {
+track('saveTextFile：不许同步 revokeObjectURL（桌面端下载要等外壳收尾）', () => {
   const { doc, created } = fakeDocument()
   const previous = { document: globalThis.document, Blob: globalThis.Blob, URL: globalThis.URL }
   let revoked = 0
@@ -152,7 +152,7 @@ track('saveTextFile：不许同步 revokeObjectURL（桌面端 .tmp 停留的根
     const ok = saveTextFile('branch-tree.json', '{}')
     assert.equal(ok, true, 'saveTextFile 应返回 true')
     assert.equal(urlCreated, 1, '应创建一个 blob: URL')
-    assert.equal(revoked, 0, '点完不能同步 revoke（Electron 里会把下载取消，留下 .tmp）')
+    assert.equal(revoked, 0, '点完不能同步 revoke（桌面端下载要等外壳把 .tmp 收尾）')
     assert.equal(created[0].href, 'blob:fake')
     assert.equal(created[0].download, 'branch-tree.json')
     assert.equal(created[0].clicked, 1)

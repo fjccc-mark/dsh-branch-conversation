@@ -1046,13 +1046,13 @@ interface DownloadScope {
 /**
  * 用**下载地址**把一次导出落成文件（GET `branch/export?...`）。
  *
- * 为什么桌面端优先走这条路（2026-10-17 桌面端实测）：
- * Electron 里走 Blob 时，Downloads 里会先出现一个 `<uuid>.tmp`（内容已写全），
- * **约二十秒后**才改名成目标文件——网页端是直接落最终名的。原因是 Blob 路径点完立刻
- * `revokeObjectURL`，正好卡在下载收尾之前，收尾只能等外壳自己慢慢确认。
- *
- * 改成让浏览器按 host 的下载地址流式下载（GET 路由已经带了 `content-disposition`），
- * 既不依赖 Blob 生命周期，也不再有时序猜测；拿不到 `document` 时调用方退回 Blob。
+ * 为什么优先走这条路（2026-10-17 桌面端实测）：
+ * 桌面端（Electron）里下载**无论走哪条路**都会先在 Downloads 落一个 `<uuid>.tmp`（内容已写全），
+ * 随后才改名成目标文件——实测 Blob 路径约 **23 秒**、GET 路径约 **6 秒**（各一次采样，不是保证值）。
+ * 也就是说 `.tmp` 是桌面下载管线的中间态，不是插件写坏了；但 GET 路径有两个实打实的好处：
+ *   ① 收尾交给下载管理器（host 的 GET 路由本来就带 `content-disposition`），不依赖 Blob 生命周期；
+ *   ② 不再有点完就 `revokeObjectURL` 的时序动作，网页端/桌面端同一套行为。
+ * 拿不到 `document` 时调用方退回 Blob。
  * @param sessionId - 用它定位树。
  * @param format - json / markdown / mermaid。
  * @param fileName - 建议文件名（`download` 属性，host 的 content-disposition 里也有）。
@@ -1109,8 +1109,8 @@ export function saveTextFile(fileName: string, content: string): boolean {
     scope.document.body?.appendChild(anchor)
     anchor.click()
     anchor.remove?.()
-    // **不能立刻 revoke**：Electron 里下载还没收尾就被取消，Downloads 里会长时间停着
-    // 一个 `<uuid>.tmp`（实测约二十秒后才改名成目标文件）。延迟撤销避免这段时序抖动。
+    // 延迟撤销：桌面端下载要等外壳收尾（`.tmp` → 正式名），点完立刻 revoke 属于无谓冒险。
+    // 实测结论：`.tmp` 在 GET 路径上也会出现，所以它不是这段代码造成的，只是这里顺手更稳一点。
     const revoke = scope.URL.revokeObjectURL
     if (typeof revoke === 'function') {
       const timer = (globalThis as { setTimeout?: (fn: () => void, ms: number) => unknown }).setTimeout
