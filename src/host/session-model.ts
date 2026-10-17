@@ -62,6 +62,27 @@ export interface DefaultModelFace {
   }
 }
 
+/**
+ * 一个工作区（只声明本插件读写的字段）。
+ *
+ * 官方语义（`subsystems/workspace.zh.md`）：工作区 = 一条目录记录 + 一份**有序会话账本**，
+ * 成员资格要求「账本里有这个 id」**且**「会话头 cwd 等于工作区路径」两条同时成立；
+ * 所有权的真源是账本 `sessionIds`，**绝不从会话 cwd 派生**。
+ */
+export interface WorkspaceFace {
+  readonly id: string
+  readonly path: string
+  /** 归属本工作区的会话（官方已按"账本 + 头 cwd 一致"过滤过）。 */
+  readonly sessionIds: readonly string[]
+  /** 把会话前插进本工作区的账本（会校验会话存在且 cwd 命中）。 */
+  attachSession: (sessionId: string) => Promise<void>
+}
+
+/** `ctx.workspaceRegistry`：工作区注册表（host 可选能力）。 */
+export interface WorkspaceRegistryFace {
+  list: () => readonly WorkspaceFace[]
+}
+
 /** host 侧可用的会话能力（全部按需探测，不写进 inject）。 */
 export interface SessionModel {
   /**
@@ -86,6 +107,13 @@ export interface SessionModel {
   readonly presets?: AgentPresetsFace
   /** 默认模型选择（沿用官方"新建会话"的口径）；缺失时交给宿主默认值。 */
   readonly defaultModel?: DefaultModelFace
+  /**
+   * 工作区注册表（可选）：用来把新建的子会话挂进**父会话所在的工作区**。
+   *
+   * 为什么必须显式挂：官方工作区的成员资格是账本制的（`sessionIds` + 头 cwd 一致），
+   * 建会话时只传 `cwd` 不会自动入账——这正是"新建的子对话掉进『未分组』"的根因。
+   */
+  readonly workspaces?: WorkspaceRegistryFace
 }
 
 /** 探测会话能力；控制面缺失时返回 null（调用方据此给出 `unsupported`）。 */export function sessionModelOf(ctx: unknown): SessionModel | null {
@@ -95,6 +123,7 @@ export interface SessionModel {
   const agents = serviceOf<AgentFactoryFace>(ctx, 'agents')
   const presets = serviceOf<AgentPresetsFace>(ctx, 'agentPresets')
   const defaultModel = serviceOf<DefaultModelFace>(ctx, 'agentDefaultModel')
+  const workspaces = serviceOf<WorkspaceRegistryFace>(ctx, 'workspaceRegistry')
   // 注意：这里**不**把方法摘出来，保留服务对象本身；调用方必须 `model.controller.list(...)`
   // 这样 `this` 才是服务对象（真机实测：摘出来裸调用会 undefined）。
   return {
@@ -104,6 +133,7 @@ export interface SessionModel {
     ...(defaultModel !== undefined && typeof defaultModel.currentSelection === 'function'
       ? { defaultModel }
       : {}),
+    ...(workspaces !== undefined && typeof workspaces.list === 'function' ? { workspaces } : {}),
   }
 }
 
@@ -294,6 +324,80 @@ export async function createChildSession(
   return {
     sessionId: createdId,
     ...(presetId !== undefined ? { agentPreset: presetId } : {}),
+  }
+}
+
+/** 把新会话挂进父会话所在工作区的结果。 */
+export interface WorkspaceAttachOutcome {
+  readonly attached: boolean
+  readonly workspaceId?: string
+  /** 没挂上的可读原因（诊断与 UI 提示用；不是错误码）。 */
+  readonly reason?: string
+}
+
+/**
+ * 把新建的子会话挂进**父会话所在的工作区**。
+ *
+ * 背景（缺陷 29）：DSH 的侧边栏按工作区分组，而工作区的成员资格是**账本制**——
+ * 「`sessionIds` 里有它」且「会话头 cwd 等于工作区路径」两条同时成立才算数，
+ * 官方文档明说"所有权的真源是账本，绝不从会话 cwd 派生"。我们建子会话时只把 `cwd` 传给了
+ * Agent 工厂，没有任何人调 `attachSession`，于是新会话在侧边栏里落进**"未分组"**。
+ *
+ * 这里按父会话反查工作区（父会话在哪个工作区，子会话就挂哪个），再把它前插进账本。
+ * 任何一步失败都**不抛**：会话已经建出来了，最坏结果只是它仍在"未分组"，由调用方给出可读原因。
+ *
+ * @param model - 探测到的会话能力。
+ * @param childSessionId - 刚建出来的子会话。
+ * @param parentSessionId - 父会话（用它定位工作区）。
+ * @returns 是否挂上、挂在哪个工作区，以及没挂上的原因。
+ */
+export async function attachToParentWorkspace(
+  model: SessionModel,
+  childSessionId: string,
+  parentSessionId: string,
+): Promise<WorkspaceAttachOutcome> {
+  const registry = model.workspaces
+  if (registry === undefined) {
+    return { attached: false, reason: '此部署没有工作区注册表（ctx.workspaceRegistry）' }
+  }
+  let workspaces: readonly WorkspaceFace[]
+  try {
+    workspaces = registry.list()
+  } catch (error) {
+    return { attached: false, reason: `读取工作区失败：${messageOf(error)}` }
+  }
+  if (!Array.isArray(workspaces)) {
+    return { attached: false, reason: '工作区注册表形状不符（list() 没返回数组）' }
+  }
+  const owner = workspaces.find((workspace) =>
+    Array.isArray(workspace?.sessionIds) ? workspace.sessionIds.includes(parentSessionId) : false,
+  )
+  if (owner === undefined) {
+    return { attached: false, reason: '父会话不在任何工作区里（它自己就是未分组）' }
+  }
+  if (typeof owner.attachSession !== 'function') {
+    return { attached: false, workspaceId: owner.id, reason: '工作区实体没有 attachSession（形状不符）' }
+  }
+  try {
+    await owner.attachSession(childSessionId)
+    return { attached: true, workspaceId: owner.id }
+  } catch (error) {
+    return {
+      attached: false,
+      workspaceId: owner.id,
+      reason: `挂进工作区失败：${messageOf(error)}`,
+    }
+  }
+}
+
+/** 把任意抛出物折成可读句子。 */
+function messageOf(error: unknown): string {
+  if (error instanceof Error) return error.message
+  if (typeof error === 'string') return error
+  try {
+    return JSON.stringify(error)
+  } catch {
+    return String(error)
   }
 }
 

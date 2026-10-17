@@ -15,6 +15,10 @@ export interface BranchCreateValue {
   readonly nodeId: string
   readonly promptDelivered: boolean
   readonly promptError?: string
+  /** 子会话是否已挂进父会话所在的工作区（缺陷 29）；`undefined` = 回包没这个字段。 */
+  readonly workspaceAttached?: boolean
+  readonly workspaceId?: string
+  readonly workspaceError?: string
 }
 
 /** 树上节点（页面渲染用的最小子集）。 */

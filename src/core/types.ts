@@ -172,6 +172,17 @@ export interface BranchCreateResult {
   readonly promptDelivered: boolean
   /** 投递失败时的可读原因（`promptDelivered === false` 时存在）。 */
   readonly promptError?: string
+  /**
+   * 子会话是否已挂进**父会话所在的工作区**（缺陷 29）。
+   *
+   * 官方工作区的成员资格是账本制的：建会话只传 `cwd` 不会入账，必须显式 `attachSession`。
+   * 缺失（`undefined`，例如旧版本回包）按"未知"处理；`false` 时会带 {@link workspaceError}。
+   */
+  readonly workspaceAttached?: boolean
+  /** 挂进去的那个工作区 id（`workspaceAttached === true` 时存在）。 */
+  readonly workspaceId?: string
+  /** 没挂上的可读原因（`workspaceAttached === false` 时存在）。 */
+  readonly workspaceError?: string
 }
 
 /** 读取某个会话所在树的结果。 */

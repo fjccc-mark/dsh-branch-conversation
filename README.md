@@ -169,7 +169,7 @@ dsh --profile branch-dev
 npm install --legacy-peer-deps         # 官方 SDK 的 peer 声明在 npm 下需要这个开关
 npm run typecheck                      # host + client 两个 program
 npm run build                          # tsdown（host ESM + client CJS）+ 套加载器外壳 + 内嵌 panel.css
-npm run smoke                          # 十套冒烟（124 项）：M0 14 + M1 17 + M4 15 + 产物 15 + 画布布局 20 + 导出 13 + 导出下载 3 + 视图状态 7 + 右侧栏 11 + 跳转 9
+npm run smoke                          # 十套冒烟（127 项）：M0 14 + M1 20 + M4 15 + 产物 15 + 画布布局 20 + 导出 13 + 导出下载 3 + 视图状态 7 + 右侧栏 11 + 跳转 9
 npm run layout-check                   # 画布形态量测：无头 Chromium 实量五档布局宽 × 展开/折叠两态（88 项）
 npm run layout-shots                   # 同上 + 两态共 10 张验收截图到 artifacts/panel-preview/（截图走 CDP）
 npm run preview                        # 打开早期静态预览页（排版目视；正式量测用 layout-check）

@@ -84,6 +84,8 @@ track('/branch/diagnostics 返回 ok 信封与完整字段', async () => {
   assert.equal(typeof value.agents, 'boolean')
   assert.equal(typeof value.sessionController, 'boolean')
   assert.equal(typeof value.agentPresets, 'boolean')
+  // 缺陷 29：工作区注册表的能力探测（在 → 子会话能挂进父会话的工作区）。
+  assert.equal(typeof value.workspaces, 'boolean')
   assert.equal(value.panelId, 'branch-conversation')
   assert.equal(value.storage.root, config.storageRoot)
   assert.equal(value.storage.exists, true, '存储根在探测前已建好，应为存在')

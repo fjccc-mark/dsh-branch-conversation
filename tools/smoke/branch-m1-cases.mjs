@@ -35,6 +35,8 @@ async function harness() {
     sessionController: fake.controller,
     agentPresets: fake.presets,
     agentDefaultModel: fake.defaultModel,
+    // 缺陷 29：工作区账本。建子会话后必须把新会话 attachSession 到父会话所在的工作区。
+    workspaceRegistry: fake.workspaces,
   }
   const service = new BranchService({ store, ctx, log: () => {} })
   return { root, fake, store, service }
@@ -46,6 +48,8 @@ async function harness() {
 
 const h1 = await harness()
 h1.fake.seedSession({ id: 's-parent', turns: 2, cwd: 'D:\\work', agentPreset: 'standard' })
+// 父会话在一个工作区里（侧边栏的「f分支对话插件」那一组）：子会话应挂进同一个工作区。
+h1.fake.workspaces.seedWorkspace({ id: 'ws-work', path: 'D:\\work', sessionIds: ['s-parent'] })
 let firstBranch = null
 
 track('createBranch：新会话无 seed（seedLength=0）但有血缘与同一个人设', async () => {
@@ -86,6 +90,20 @@ track('createBranch：新会话是可打开、会落盘的真实会话（在会�
     h1.fake.persistedIds().includes(firstBranch.sessionId),
     `子会话不在会话列表里：${JSON.stringify(h1.fake.persistedIds())}`,
   )
+})
+
+track('createBranch：子会话被挂进父会话所在的工作区（缺陷 29，不再落到「未分组」）', async () => {
+  // 官方工作区是**账本制**：只传 cwd 不会入账，必须显式 attachSession。
+  assert.equal(
+    firstBranch.workspaceAttached,
+    true,
+    `回包说没挂进工作区：${firstBranch.workspaceError ?? '(没有原因)'}`,
+  )
+  assert.equal(firstBranch.workspaceId, 'ws-work', '挂进了错误的工作区')
+  const owner = h1.fake.workspaces.workspaceOf(firstBranch.sessionId)
+  assert.ok(owner !== undefined, '子会话不在任何工作区的账本里（侧边栏会显示「未分组」）')
+  assert.equal(owner.id, 'ws-work', '子会话挂到了别的工作区')
+  assert.deepEqual(h1.fake.workspaces.rejected, [], '不该有被拒绝的 attach')
 })
 
 track('createBranch：树上出现父节点，新分支挂在该节点的 children 下', async () => {
@@ -337,6 +355,52 @@ track('路由：/branch/create 走通，缺字段 400，未知路由 404，缺�
 })
 
 // ---------------------------------------------------------------------------
+// 缺陷 29 的降级路径：父会话自己就不在任何工作区里 / 部署没有工作区注册表
+// ---------------------------------------------------------------------------
+
+const h9 = await harness()
+h9.fake.seedSession({ id: 's-loose', turns: 1, cwd: 'D:\\loose' })
+
+track('createBranch：父会话未分组时，建会话照常成功，回包说清"没挂上工作区"', async () => {
+  const created = await h9.service.createBranch(
+    { parentSessionId: 's-loose', parentTurn: 1 },
+    never,
+  )
+  assert.equal(created.workspaceAttached, false, '父会话未分组时不该声称挂上了')
+  assert.match(
+    String(created.workspaceError),
+    /工作区/u,
+    `应给出可读原因，实际 ${String(created.workspaceError)}`,
+  )
+  assert.ok(h9.fake.get(created.sessionId) !== undefined, '会话本身仍应建出来（降级不拦路）')
+  assert.equal(
+    h9.fake.workspaces.workspaceOf(created.sessionId),
+    undefined,
+    '父会话不在工作区时，不该凭空造一个工作区',
+  )
+})
+
+track('createBranch：部署没有 workspaceRegistry 时降级为"未挂上"，不抛错', async () => {
+  const loose = createFakeSessions()
+  loose.seedSession({ id: 's-nows', turns: 1, cwd: 'D:\\nows' })
+  const service = new BranchService({
+    store: h9.store,
+    ctx: {
+      agents: loose.agents,
+      sessions: loose.store,
+      sessionController: loose.controller,
+      agentPresets: loose.presets,
+      agentDefaultModel: loose.defaultModel,
+      // 刻意不给 workspaceRegistry：老部署 / 精简部署就是这样
+    },
+    log: () => {},
+  })
+  const created = await service.createBranch({ parentSessionId: 's-nows', parentTurn: 1 }, never)
+  assert.equal(created.workspaceAttached, false, '没有注册表时不该声称挂上了')
+  assert.match(String(created.workspaceError), /工作区/u, '应给出可读原因')
+})
+
+// ---------------------------------------------------------------------------
 // 串行执行
 // ---------------------------------------------------------------------------
 
@@ -352,7 +416,7 @@ for (const item of cases) {
 }
 console.log(`\n${cases.length - failed}/${cases.length} 通过`)
 
-for (const holder of [h1, h2, h3]) {
+for (const holder of [h1, h2, h3, h9]) {
   await rm(holder.root, { recursive: true, force: true })
 }
 process.exitCode = failed === 0 ? 0 : 1

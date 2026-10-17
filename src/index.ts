@@ -113,6 +113,7 @@ export function apply(ctx: Context, config?: Partial<Config>): void {
         agents: summary.agents,
         sessionController: summary.sessionController,
         agentPresets: summary.agentPresets,
+        workspaces: summary.workspaces,
         storage: { root: summary.storageRoot, exists: summary.root.exists, writable: summary.root.writable },
         panelId: BRANCH_PANEL_ID,
         treeCount: summary.treeCount,

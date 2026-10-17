@@ -397,11 +397,7 @@ export function BranchPanelPage({
   const created = useCallback(
     async (value: BranchCreateValue) => {
       setBranchFrom(null)
-      setStatus(
-        value.promptDelivered
-          ? `已建子会话 ${value.sessionId}，首句提问已排进它的待办队列。`
-          : `已建子会话 ${value.sessionId}${value.promptError !== undefined ? `（首句未投递：${value.promptError}）` : ''}。`,
-      )
+      setStatus(createdStatus(value))
       await refresh(value.sessionId)
     },
     [refresh],
@@ -600,6 +596,10 @@ export function BranchPanelPage({
               <span className={cls.hint}>（模型/人设/权限继承）</span>
             </li>
             <li>
+              工作区注册表 <code>ctx.workspaceRegistry</code>：{flag(report.workspaces)}
+              <span className={cls.hint}>（建子会话后把它挂进父会话的工作区；缺失时会落到「未分组」）</span>
+            </li>
+            <li>
               存储根：<code>{report.storage.root}</code> · 存在 {flag(report.storage.exists)} · 可写{' '}
               {flag(report.storage.writable)}
             </li>
@@ -732,11 +732,7 @@ export function BranchCanvasView({
   const created = useCallback(
     async (value: BranchCreateValue) => {
       setBranchFrom(null)
-      setNotice(
-        value.promptDelivered
-          ? `已建子会话 ${value.sessionId}，首句提问已排进它的待办队列。`
-          : `已建子会话 ${value.sessionId}${value.promptError !== undefined ? `（首句未投递：${value.promptError}）` : ''}。`,
-      )
+      setNotice(createdStatus(value))
       await refresh(value.sessionId)
     },
     [refresh],
@@ -1109,6 +1105,25 @@ export function BranchCreateForm({
       {failure !== null ? <p className={cls.warn}>{failure}</p> : null}
     </div>
   )
+}
+
+/**
+ * 建子会话后的状态行：会话 id + 首句投递结果 + **工作区归属**（缺陷 29 的可见反馈）。
+ *
+ * `workspaceAttached` 是 host 新加的字段：`true` 说明已挂进父会话的工作区；`false` 说明没挂上
+ * （附可读原因），这时会话在侧边栏里会落在「未分组」——必须当场让人看见，而不是等他自己去列表里找。
+ * @param value - 建会话的回包。
+ * @returns 一行可读状态。
+ */
+function createdStatus(value: BranchCreateValue): string {
+  const base = value.promptDelivered
+    ? `已建子会话 ${value.sessionId}，首句提问已排进它的待办队列。`
+    : `已建子会话 ${value.sessionId}${value.promptError !== undefined ? `（首句未投递：${value.promptError}）` : ''}。`
+  if (value.workspaceAttached === true) return `${base}已在父会话的工作区里。`
+  if (value.workspaceAttached === false) {
+    return `${base}⚠ 没能加入父会话的工作区（${value.workspaceError ?? '未知原因'}），侧边栏里会落在「未分组」。`
+  }
+  return base
 }
 
 function flag(value: boolean): string {

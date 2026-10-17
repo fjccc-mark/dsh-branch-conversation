@@ -28,6 +28,7 @@ import {
 import { exportTree, fileNameOf, type ExportFormat } from '../core/export.ts'
 import { TreeStore, type TreeWriteFailure } from './tree-store.ts'
 import {
+  attachToParentWorkspace,
   createChildSession,
   deliverFirstPrompt,
   inspectSession,
@@ -253,6 +254,20 @@ export class BranchService {
       signal,
     })
 
+    // 1.5) 把子会话挂进**父会话所在的工作区**（缺陷 29）。
+    //      官方工作区的成员资格是账本制的：建会话只传 cwd 不会入账，必须显式 attachSession；
+    //      不挂的话新会话在侧边栏里落进"未分组"。失败不拦住建分支——会话已经建好，
+    //      只是要能用可读原因告诉用户"它没进工作区"。
+    const workspace = await attachToParentWorkspace(model, created.sessionId, parentSessionId)
+    if (!workspace.attached) {
+      this.deps.log(`[branch-conversation] 子会话 ${created.sessionId} 未加入父会话的工作区：${workspace.reason ?? '未知原因'}`)
+    }
+    const workspaceFields: Partial<BranchCreateResult> = {
+      workspaceAttached: workspace.attached,
+      ...(workspace.workspaceId !== undefined ? { workspaceId: workspace.workspaceId } : {}),
+      ...(workspace.attached ? {} : { workspaceError: workspace.reason ?? '未知原因' }),
+    }
+
     // 2) 再在每棵树一把锁的队列里写树文档（新节点的 id 在锁内生成，保证同名幂等）。
     const nodeId = this.nextNodeId()
     const write = await this.store.update(treeId, (current) => {
@@ -297,7 +312,7 @@ export class BranchService {
 
     // 4) 首句提问：尽力而为，失败不影响已经建好的会话与节点。
     if (prompt === '') {
-      return { sessionId: created.sessionId, treeId, nodeId, promptDelivered: false }
+      return { sessionId: created.sessionId, treeId, nodeId, promptDelivered: false, ...workspaceFields }
     }
     const delivered = await deliverFirstPrompt(model, created.sessionId, prompt, signal)
     return {
@@ -306,6 +321,7 @@ export class BranchService {
       nodeId,
       promptDelivered: delivered.ok,
       ...(delivered.reason !== undefined ? { promptError: delivered.reason } : {}),
+      ...workspaceFields,
     }
   }
 
@@ -687,6 +703,8 @@ export class BranchService {
     readonly agents: boolean
     readonly sessionController: boolean
     readonly agentPresets: boolean
+    /** 工作区注册表在不在：在才谈得上"把子会话挂进父会话的工作区"（缺陷 29）。 */
+    readonly workspaces: boolean
   }> {
     const probe = await this.store.probeRoot()
     const ids = (await this.store.listTreeIds()).filter((id) => id !== TREE_INDEX_ID)
@@ -695,6 +713,7 @@ export class BranchService {
     const agents = serviceOf<{ create?: unknown }>(this.deps.ctx, 'agents')
     const sessionController = serviceOf<{ list?: unknown }>(this.deps.ctx, 'sessionController')
     const agentPresets = serviceOf<{ resolve?: unknown }>(this.deps.ctx, 'agentPresets')
+    const workspaces = serviceOf<{ list?: unknown }>(this.deps.ctx, 'workspaceRegistry')
     return {
       storageRoot: this.store.storageRoot,
       root: probe,
@@ -702,6 +721,7 @@ export class BranchService {
       agents: typeof agents?.create === 'function',
       sessionController: typeof sessionController?.list === 'function',
       agentPresets: typeof agentPresets?.resolve === 'function',
+      workspaces: typeof workspaces?.list === 'function',
     }
   }
 }

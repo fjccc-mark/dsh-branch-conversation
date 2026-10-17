@@ -16,6 +16,8 @@ export interface CapabilityReport {
   readonly sessionController: boolean
   /** `ctx.agentPresets` 是否在场。 */
   readonly agentPresets: boolean
+  /** `ctx.workspaceRegistry` 是否在场：在才能把子会话挂进父会话的工作区（缺陷 29）。 */
+  readonly workspaces: boolean
   /** 存储根状态。 */
   readonly storage: { readonly root: string; readonly exists: boolean; readonly writable: boolean }
   /** 面板 id。 */

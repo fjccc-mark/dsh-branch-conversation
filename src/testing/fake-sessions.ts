@@ -65,6 +65,35 @@ export interface FakeDefaultModel {
   currentSelection: () => { readonly provider: string; readonly model: string }
 }
 
+/** 一个假工作区（形状照官方 `Workspace` 的最小子集）。 */
+export interface FakeWorkspace {
+  readonly id: string
+  readonly path: string
+  readonly sessionIds: readonly string[]
+  attachSession: (sessionId: string) => Promise<void>
+}
+
+/**
+ * 假工作区注册表（`ctx.workspaceRegistry`）。
+ *
+ * 照官方的**账本语义**造：成员资格只看账本 `sessionIds`（外加"会话存在 + cwd 与工作区路径一致"的校验），
+ * **不从 cwd 派生**——这样"建会话时只传 cwd 就以为进了工作区"的误解会在假环境里直接暴露。
+ */
+export interface FakeWorkspaces {
+  /** 同步投影（官方 `list()` 的形状）。 */
+  list: () => readonly FakeWorkspace[]
+  /** 造一个工作区，并把给定会话记进账本（模拟用户把会话拖进工作区）。 */
+  seedWorkspace: (input: {
+    id: string
+    path: string
+    sessionIds?: readonly string[]
+  }) => FakeWorkspace
+  /** 某个会话现在落在哪个工作区（测试断言用）。 */
+  workspaceOf: (sessionId: string) => FakeWorkspace | undefined
+  /** 被拒绝的 attach（消息里带原因；测试断言用）。 */
+  readonly rejected: readonly string[]
+}
+
 /** 假会话面。 */
 export interface FakeSessions {
   /** 官方 Agent 工厂（建会话的正规通道）。 */
@@ -82,6 +111,8 @@ export interface FakeSessions {
   readonly presets: FakePresets
   /** 默认模型（可选传给 BranchService 的 ctx）。 */
   readonly defaultModel: FakeDefaultModel
+  /** 工作区注册表（可选传给 BranchService 的 ctx）。 */
+  readonly workspaces: FakeWorkspaces
   /** 造一个带有 n 轮问答的会话（可在其中插入子智能体会话）。 */
   seedSession(input: {
     id: string
@@ -108,6 +139,38 @@ export function createFakeSessions(): FakeSessions {
   const sessions = new Map<string, FakeSession>()
   const mounted: string[] = []
   let counter = 0
+
+  /** 假工作区的内部记录（账本是 `ids`；对外只给只读投影）。 */
+  const projects = new Map<string, { id: string; path: string; ids: string[] }>()
+  /** 被拒绝的 attach 原因（测试断言用）。 */
+  const rejectedAttach: string[] = []
+
+  /**
+   * 把内部记录折成对外实体。
+   * @param record - 内部记录。
+   * @returns 带 `attachSession` 的工作区实体。
+   */
+  const entityOf = (record: { id: string; path: string; ids: string[] }): FakeWorkspace => ({
+    id: record.id,
+    path: record.path,
+    get sessionIds(): readonly string[] {
+      return [...record.ids]
+    },
+    attachSession: async (sessionId: string): Promise<void> => {
+      const session = sessions.get(sessionId)
+      if (session === undefined || session.deleted) {
+        rejectedAttach.push(`unknown session ${sessionId}`)
+        throw new Error(`workspace attach: session ${sessionId} not found`)
+      }
+      // 官方校验：会话头的规范 cwd 必须等于工作区路径（这里用字面比较）。
+      const cwd = session.meta.cwd
+      if (cwd === undefined || cwd !== record.path) {
+        rejectedAttach.push(`cwd mismatch ${sessionId}: ${cwd ?? '(none)'} != ${record.path}`)
+        throw new Error(`workspace attach: cwd mismatch for ${sessionId}`)
+      }
+      if (!record.ids.includes(sessionId)) record.ids.unshift(sessionId)
+    },
+  })
 
   const nextId = (): string => {
     counter += 1
@@ -245,6 +308,19 @@ export function createFakeSessions(): FakeSessions {
     },
     defaultModel: {
       currentSelection: () => ({ provider: 'fake-provider', model: 'fake-model' }),
+    },
+    workspaces: {
+      list: () => [...projects.values()].map(entityOf),
+      seedWorkspace: (input) => {
+        const record = { id: input.id, path: input.path, ids: [...(input.sessionIds ?? [])] }
+        projects.set(record.id, record)
+        return entityOf(record)
+      },
+      workspaceOf: (sessionId) => {
+        const record = [...projects.values()].find((item) => item.ids.includes(sessionId))
+        return record === undefined ? undefined : entityOf(record)
+      },
+      rejected: rejectedAttach,
     },
     seedSession,
     addTurn: (sessionId, opts) => addTurnTo(require(sessionId), opts ?? {}),

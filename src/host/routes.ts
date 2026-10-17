@@ -19,6 +19,8 @@ export interface RouteDeps {
     readonly agents: boolean
     readonly sessionController: boolean
     readonly agentPresets: boolean
+    /** 工作区注册表是否在场（建子会话后把新会话挂进父会话的工作区）。 */
+    readonly workspaces: boolean
     readonly storage: { readonly root: string; readonly exists: boolean; readonly writable: boolean }
     readonly panelId: string
     readonly treeCount: number
