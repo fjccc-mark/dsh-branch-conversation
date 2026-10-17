@@ -19,6 +19,7 @@ DeepSeek Harness（DSH）插件：在官方侧边栏中新增一个**「分支�
 > 画布可双向滚动 + 缩放（30%~200%，首次自动适配宽度）。详见 [docs/进度快照.md](docs/进度快照.md) §1.1、§4.3 与
 > [docs/分支对话插件·完善计划.md](docs/分支对话插件·完善计划.md) §5.5.5。
 
+**第一次看这个项目，先读 [介绍文档](docs/分支对话插件·介绍.md)**（一页说清：是什么 / 为什么 / 怎么用 / 边界 / 现在到什么程度）。
 完整规格见 [docs/分支对话插件·设计文档.md](docs/分支对话插件·设计文档.md)，
 缺口分析与里程碑见 [docs/分支对话插件·完善计划.md](docs/分支对话插件·完善计划.md)，
 **现状与验证程度**见 [docs/分支对话插件·现状总结.md](docs/分支对话插件·现状总结.md)，
@@ -160,7 +161,7 @@ dsh --profile branch-dev
 > CLI 对它报 `profile "desktop" is managed exclusively by the Electron application`。
 > 因此桌面端只能走**应用内插件管理器**（会话里的 `plugin_manager` 工具打的就是同一条受管管线
 > `ctx.pluginManager.installBundle`）：`link:<仓库绝对路径>` 装完**立即生效、不用重启应用**；
-> 但改过 `lib/client.js` 之后要重载一次页面。详见 [测试文档 §11](docs/分支对话插件·测试文档.md)。
+> 之后改 `lib/client.js` 也会被 client-modules 热重载。详见 [测试文档 §11](docs/分支对话插件·测试文档.md)。
 
 ## 开发
 
@@ -168,7 +169,7 @@ dsh --profile branch-dev
 npm install --legacy-peer-deps         # 官方 SDK 的 peer 声明在 npm 下需要这个开关
 npm run typecheck                      # host + client 两个 program
 npm run build                          # tsdown（host ESM + client CJS）+ 套加载器外壳 + 内嵌 panel.css
-npm run smoke                          # 九套冒烟（120 项）：M0 14 + M1 17 + M4 15 + 产物 14 + 画布布局 20 + 导出 13 + 视图状态 7 + 右侧栏 11 + 跳转 9
+npm run smoke                          # 十套冒烟（124 项）：M0 14 + M1 17 + M4 15 + 产物 15 + 画布布局 20 + 导出 13 + 导出下载 3 + 视图状态 7 + 右侧栏 11 + 跳转 9
 npm run layout-check                   # 画布形态量测：无头 Chromium 实量五档布局宽 × 展开/折叠两态（88 项）
 npm run layout-shots                   # 同上 + 两态共 10 张验收截图到 artifacts/panel-preview/（截图走 CDP）
 npm run preview                        # 打开早期静态预览页（排版目视；正式量测用 layout-check）
@@ -177,7 +178,9 @@ npm run preview                        # 打开早期静态预览页（排版目
 - 构建与类型检查依赖官方 `@deepseek-ai/*` SDK。注意：**公开 npm 的版本线与运行时 CLI 不同号**
   （公开线是 `0.0.1-rc.1` / `0.1.2-alpha.2`，CLI 是 `0.2.0-rc.2`），`package.json` 按可获得的版本声明，
   运行门仍写 `dsh.engines.dsh >= 0.2.0-rc.2`。
-- 改 **host** 代码需要重启 profile；改 **client** 产物后刷新页面即可（有 watcher 时可 HMR）。
+- 改 **host** 代码需要重启 profile；改 **client** 产物：网页端刷新页面即可，**桌面端由 client-modules 热重载**
+  （实测重建 `lib/client.js` 后不重启就生效；`Ctrl+R`/`F5` 在桌面壳里无效，但 **F12 能开 DevTools**；
+  构建中间态会短暂报一次 `exports is not defined`，落定自愈）。
 - **页面样式靠产物自己带**：`panel.css` 由 `tools/build/wrap-client-bundle.mjs` 内嵌成
   `window.__DSH_BRANCH_CSS__`，`src/client/style.ts` 在 `apply()` 时插成 `<style>`。
   不要再写 `import './panel.css'`——加载器不处理 CSS 副作用（这正是之前"真机上一直没样式"的原因）。
