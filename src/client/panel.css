@@ -154,6 +154,37 @@
   line-height: 1.6;
 }
 
+/**
+ * 右侧详情列里的**紧凑表单**（M7 追加：窄栏也能直接建子会话）。
+ *
+ * 与页面表单的差别只有"留白与信息量"：面板级说明行与轮次输入框都不摆
+ * （轮次固定为被点的那个框），所以宽度跟着窄栏走、不再设 max-width。
+ */
+.dsh-branch-form-compact {
+  max-width: none;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.3));
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2, rgba(128, 128, 128, 0.08));
+}
+
+.dsh-branch-form-compact .dsh-branch-section-title {
+  font-size: 12.5px;
+  margin: 0;
+}
+
+.dsh-branch-form-compact .dsh-branch-muted {
+  font-size: 11.5px;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.dsh-branch-form-compact .dsh-branch-button {
+  font-size: 12px;
+  padding: 5px 10px;
+}
+
 .dsh-branch-actions {
   display: flex;
   gap: 8px;

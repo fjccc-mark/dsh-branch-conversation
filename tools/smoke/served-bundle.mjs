@@ -52,6 +52,9 @@ const REQUIRED = [
   'dsh-branch-node-handle',
   'dsh-branch-node-plus',
   'dsh-branch-node-title',
+  // M7 追加：右侧详情列的紧凑建会话表单（窄栏也能直接建子会话）。
+  'dsh-branch-compact-form',
+  'dsh-branch-form-compact',
 ]
 
 /** 旧形态的残留标记（必须为 0 次）。 */

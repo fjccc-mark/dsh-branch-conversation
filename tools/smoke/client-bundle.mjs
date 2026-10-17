@@ -205,6 +205,19 @@ track('产物是 __ModuleLoader__.load({ id, factory }) 形状，id 是**包名*
   assert.equal(typeof definition.factory, 'function', 'factory 不是函数')
 })
 
+track('右侧详情列的**紧凑建会话表单**在产物里（窄栏也能直接建子会话）', () => {
+  // M7 追加：右侧页签里点「＋」不再只是"请去左侧"，而是就地弹一个紧凑表单。
+  // 这里只能断言"产物里有这两处标记"（真正的交互由真机 UI 探针验），但足以防止被删回去。
+  assert.ok(
+    source.includes('dsh-branch-compact-form'),
+    '产物里没有紧凑表单标记（data-dsh-branch-compact-form）',
+  )
+  assert.ok(
+    source.includes('dsh-branch-form-compact'),
+    '产物里没有紧凑表单样式类（dsh-branch-form-compact）',
+  )
+})
+
 track('导出形状：apply 是函数，inject 含 slots', () => {
   exports = definition.factory(requireModule)
   assert.ok(exports !== null && exports !== undefined, 'factory 没有返回导出对象')

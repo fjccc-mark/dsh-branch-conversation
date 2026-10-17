@@ -47,6 +47,8 @@ const cls = {
   toolbar: 'dsh-branch-toolbar',
   button: 'dsh-branch-button',
   form: 'dsh-branch-form',
+  /** 右侧详情列里用的**紧凑表单**（窄栏放不下页面级留白与说明行）。 */
+  formCompact: 'dsh-branch-form-compact',
   field: 'dsh-branch-field',
   label: 'dsh-branch-label',
   input: 'dsh-branch-input',
@@ -656,24 +658,22 @@ function BranchCanvas({
  * 一个"只含画布"的视图（M7：右侧详情列的页签内容）。
  *
  * 与左侧 `BranchPanelPage` 的关系：**共用** `useBranchCanvasState`（取树/布局/缩放/滚动/动作）
- * 与 `BranchCanvas`/`NodeBox`（渲染），只是**外壳不同**——这里只有一块画布，
- * 没有工具条的导出/刷新/自检，也没有建分支表单（那些属于"页面"）。
+ * 与 `BranchCanvas`/`NodeBox`（渲染），只是**外壳不同**——这里只有画布 + 一条窄工具条，
+ * 没有页面级的导出/自检块。
  *
  * 右侧栏比中央列窄得多（默认约 320~420px），所以：
  *   - 画布高度改成**撑满容器**（而不是页面那种 `62vh`），窄栏里纵向空间更值钱；
- *   - 点「＋」建分支时，直接给一句话提示引导用户回左侧页面填表
- *     （表单在窄栏里根本铺不开，而且"建分支"是一次性动作，不值得在两处各放一份 UI）。
+ *   - 点「＋」建分支时用**紧凑表单**（`BranchCreateForm compact`）：只有标题、一句轮次说明、
+ *     两行提问框与两个按钮——轮次固定为被点的那个框，所以不摆轮次输入框（窄栏也放得下）。
  *
  * @param props.sessionId - 该页签所属会话（框架按 session 作用域给出）。
- * @param props.onRequestPage - 可选：请求官方把中央列切回本插件的页面（用于"去左侧建分支"）。
  */
 export function BranchCanvasView({
   sessionId = null,
-  onRequestPage,
 }: {
   sessionId?: string | null
-  onRequestPage?: () => void
 }): ReactNode {
+  const [branchFrom, setBranchFrom] = useState<TreeBox | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const {
     layout,
@@ -690,10 +690,19 @@ export function BranchCanvasView({
     onToggle,
   } = useBranchCanvasState(sessionId)
 
-  const onBranch = useCallback(() => {
-    setNotice('建分支请到左侧「分支对话」页面操作（这里窄，填不下表单）')
-    onRequestPage?.()
-  }, [onRequestPage])
+  /** 建成功后就地刷新（同 `BranchPanelPage`）：子树还在同一棵树里，框数 +1。 */
+  const created = useCallback(
+    async (value: BranchCreateValue) => {
+      setBranchFrom(null)
+      setNotice(
+        value.promptDelivered
+          ? `已建子会话 ${value.sessionId}，首句提问已排进它的待办队列。`
+          : `已建子会话 ${value.sessionId}${value.promptError !== undefined ? `（首句未投递：${value.promptError}）` : ''}。`,
+      )
+      await refresh(value.sessionId)
+    },
+    [refresh],
+  )
 
   return (
     <div className={cls.canvasPane} ref={pageRef} data-dsh-branch-sidebar-view="">
@@ -749,7 +758,17 @@ export function BranchCanvasView({
       </div>
 
       {failure !== null ? <p className={cls.warn}>{failure}</p> : null}
-      {notice !== null ? <p className={cls.muted}>{notice}</p> : null}
+      {notice !== null ? <p className={cls.muted} data-dsh-branch-compact-status="">{notice}</p> : null}
+      {branchFrom !== null ? (
+        <BranchCreateForm
+          compact
+          parentLabel={branchFrom.label}
+          parentSessionId={branchFrom.sessionId}
+          defaultTurn={branchFrom.turn ?? 1}
+          onCancel={() => setBranchFrom(null)}
+          onCreated={created}
+        />
+      ) : null}
       {layout.nodes.length === 0 ? (
         <p className={cls.empty} data-dsh-branch-empty="">
           {status ?? (sessionId === null ? '这个部署还没有可显示的会话' : '这个会话还没有节点')}
@@ -763,7 +782,7 @@ export function BranchCanvasView({
           onOpenSession={onOpenSession}
           onOpenFile={onOpenFile}
           onToggle={onToggle}
-          onBranch={onBranch}
+          onBranch={setBranchFrom}
         />
       )}
     </div>
@@ -863,12 +882,18 @@ function BranchCreateForm({
   defaultTurn,
   onCancel,
   onCreated,
+  compact = false,
 }: {
   parentLabel: string
   parentSessionId: string
   defaultTurn: number
   onCancel: () => void
   onCreated: (value: BranchCreateValue) => Promise<void> | void
+  /**
+   * 紧凑形态（右侧详情列用）：窄栏里放不下"父会话说明 + 轮次输入框"，
+   * 所以只留标题、一句轮次说明、提问框与两个按钮；轮次固定为**被点的那个框**的轮次。
+   */
+  compact?: boolean
 }): ReactNode {
   const [parentTurn, setParentTurn] = useState(String(defaultTurn))
   const [prompt, setPrompt] = useState('')
@@ -893,27 +918,38 @@ function BranchCreateForm({
   }
 
   return (
-    <div className={cls.form}>
+    <div
+      className={compact ? `${cls.form} ${cls.formCompact}` : cls.form}
+      {...(compact ? { 'data-dsh-branch-compact-form': '' } : {})}
+    >
       <h3 className={cls.sectionTitle}>在「{parentLabel}」上提新问题</h3>
-      <p className={cls.muted}>
-        父会话 <code>{parentSessionId}</code>（子会话不继承上下文，只继承模型人设与权限）
-      </p>
-      <label className={cls.field}>
-        <span className={cls.label}>父节点轮次（第几次问答，从 1 开始）</span>
-        <input
-          className={cls.input}
-          value={parentTurn}
-          onChange={(event: ChangeEvent<HTMLInputElement>) => setParentTurn(event.target.value)}
-          inputMode="numeric"
-        />
-      </label>
+      {compact ? (
+        <p className={cls.muted}>
+          父轮次：第 {parentTurn} 轮（子会话不继承上下文，只继承模型人设与权限）
+        </p>
+      ) : (
+        <>
+          <p className={cls.muted}>
+            父会话 <code>{parentSessionId}</code>（子会话不继承上下文，只继承模型人设与权限）
+          </p>
+          <label className={cls.field}>
+            <span className={cls.label}>父节点轮次（第几次问答，从 1 开始）</span>
+            <input
+              className={cls.input}
+              value={parentTurn}
+              onChange={(event: ChangeEvent<HTMLInputElement>) => setParentTurn(event.target.value)}
+              inputMode="numeric"
+            />
+          </label>
+        </>
+      )}
       <label className={cls.field}>
         <span className={cls.label}>首句提问（可留空，稍后在子会话里输入）</span>
         <textarea
           className={cls.textarea}
           value={prompt}
           onChange={(event: ChangeEvent<HTMLTextAreaElement>) => setPrompt(event.target.value)}
-          rows={3}
+          rows={compact ? 2 : 3}
           placeholder="在这个节点上想问的新问题……"
         />
       </label>
