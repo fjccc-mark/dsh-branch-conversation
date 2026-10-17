@@ -29,7 +29,13 @@ async function harness() {
   const root = await mkdtemp(join(tmpdir(), 'branch-m1-'))
   const fake = createFakeSessions()
   const store = new TreeStore({ root })
-  const ctx = { sessions: fake.store, sessionController: fake.controller }
+  const ctx = {
+    agents: fake.agents,
+    sessions: fake.store,
+    sessionController: fake.controller,
+    agentPresets: fake.presets,
+    agentDefaultModel: fake.defaultModel,
+  }
   const service = new BranchService({ store, ctx, log: () => {} })
   return { root, fake, store, service }
 }
@@ -53,18 +59,42 @@ track('createBranch：新会话无 seed（seedLength=0）但有血缘与同一�
   assert.equal(child.meta.parentSession, 's-parent', '血缘应指向父会话')
   assert.equal(child.meta.agentPreset, 'standard', '人设/权限应继承父会话')
   assert.equal(child.meta.cwd, 'D:\\work', '工作目录应沿用父会话')
+  assert.equal(child.meta.isSeeded, false, '会话头应写明 isSeeded=false（与官方新建会话同款）')
+  assert.equal(child.meta.delegationDepth, 0, '不是子智能体，委托深度为 0')
   assert.deepEqual(child.events, [], '新会话不该有继承来的事件')
   assert.equal(firstBranch.promptDelivered, true, '首句提问应被投递')
   assert.equal(child.prompts.length, 1)
   assert.equal(child.prompts[0].mode, 'queue', '新会话应先排队而不是 steer')
   assert.equal(child.prompts[0].text, '这个函数的复杂度是多少？')
+  // 缺陷 27 的回归：会话 id 必须是**真实 uuid 会话**，不是 `session-<n>` 计数器号。
+  assert.match(
+    firstBranch.sessionId,
+    /^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u,
+    `子会话 id 应是 session-<uuid>（真实会话），实际 ${firstBranch.sessionId}`,
+  )
+  // 走的是 Agent 工厂：父会话的 preset 必须在 setup 里真的 mount 过（工具集/权限来自它）。
+  assert.ok(
+    h1.fake.presets.mounted.includes('standard'),
+    `人设没有被装配：${JSON.stringify(h1.fake.presets.mounted)}`,
+  )
+})
+
+track('createBranch：新会话是可打开、会落盘的真实会话（在会话列表里）', async () => {
+  // 缺陷 27 的核心断言：旧通道（ctx.sessions.create）建出的会话**不进列表**，
+  // 于是树上节点永远匹配不到真实会话 → 真机看到"子会话变成新根"。
+  assert.ok(
+    h1.fake.persistedIds().includes(firstBranch.sessionId),
+    `子会话不在会话列表里：${JSON.stringify(h1.fake.persistedIds())}`,
+  )
 })
 
 track('createBranch：树上出现父节点，新分支挂在该节点的 children 下', async () => {
   const view = await h1.service.viewOfSession(firstBranch.sessionId)
   assert.equal(view.document.root.sessionId, 's-parent', '树根应是父会话')
-  const parentNode = view.document.nodes.find((node) => node.sessionId === 's-parent')
-  assert.ok(parentNode !== undefined, '树上没有父会话的节点')
+  const parentNode = view.document.nodes.find(
+    (node) => node.sessionId === 's-parent' && node.turn === 2,
+  )
+  assert.ok(parentNode !== undefined, '树上没有「第 2 轮」的父节点')
   const childNodeId = parentNode.children[0]
   assert.ok(childNodeId !== undefined, '父节点没有子节点')
   const childNode = view.document.nodes.find((node) => node.id === childNodeId)
@@ -72,6 +102,36 @@ track('createBranch：树上出现父节点，新分支挂在该节点的 childr
   assert.equal(childNode.sessionId, firstBranch.sessionId)
   assert.equal(childNode.anchorSeq, 7, '锚点应是父轮次 turn/end 的 seq')
   assert.equal(childNode.label, '这个函数的复杂度是多少？', '子节点标题应取首句提问')
+  // 缺陷 27 的回归：挂载点必须是**点的那一轮**，不能是该会话的第一个节点。
+  const firstTurn = view.document.nodes.find(
+    (node) => node.sessionId === 's-parent' && node.turn === 1,
+  )
+  assert.deepEqual(firstTurn.children, [], '第 2 轮上建的分支不该挂到第 1 轮下面')
+})
+
+track('adoptSession：子会话与父会话共用同一棵树（不会再被当成新根）', async () => {
+  // 缺陷 27 的第二个症状：打开刚建出来的子会话时，它必须是父会话那棵树里的一员。
+  const childView = await h1.service.adoptSession(firstBranch.sessionId, never)
+  const parentView = await h1.service.viewOfSession('s-parent')
+  assert.equal(childView.treeId, parentView.treeId, '子会话应落在父会话同一棵树里')
+  assert.equal(childView.document.root.sessionId, 's-parent', '树的根仍是父会话')
+  assert.equal(childView.currentNodeId !== null, true, '子会话在树上应能定位到自己的节点')
+  // 落盘上也只有这一棵树（不能凭空多出一棵以子会话为根的树）。
+  const treeIds = (await h1.store.listTreeIds()).filter((id) => id !== '_index')
+  assert.equal(treeIds.length, 1, `不该多出一棵树：${treeIds.join(', ')}`)
+})
+
+track('adoptSession：子会话跑完第一轮后认领占位节点（不重复长出一个框）', async () => {
+  const before = await h1.service.viewOfSession(firstBranch.sessionId)
+  const beforeCount = before.document.nodes.filter(
+    (node) => node.sessionId === firstBranch.sessionId,
+  ).length
+  h1.fake.addTurn(firstBranch.sessionId)
+  const after = await h1.service.adoptSession(firstBranch.sessionId, never)
+  const childNodes = after.document.nodes.filter((node) => node.sessionId === firstBranch.sessionId)
+  assert.equal(childNodes.length, beforeCount, '占位节点应被认领，而不是再加一个「第 1 轮」')
+  assert.equal(childNodes[0].turn, 1, '占位节点应升级成第 1 轮')
+  assert.equal(childNodes[0].label, '这个函数的复杂度是多少？', '首句提问当标题的节点不该被改成通用名')
 })
 
 track('createBranch：索引记住了树里的会话（索引丢了也能靠扫描重建）', async () => {
@@ -211,8 +271,11 @@ track('路由：/branch/create 走通，缺字段 400，未知路由 404，缺�
       logger: { info: () => {}, warn: () => {} },
       webServer: { register: (input) => ((handler = input.handler), () => disposers.push('disposed')) },
       effect: (factory) => disposers.push(factory()),
+      agents: fake.agents,
       sessions: fake.store,
       sessionController: fake.controller,
+      agentPresets: fake.presets,
+      agentDefaultModel: fake.defaultModel,
     },
     Config({ storageRoot: root, http: true }),
   )
@@ -256,7 +319,7 @@ track('路由：/branch/create 走通，缺字段 400，未知路由 404，缺�
     new Request('http://127.0.0.1:19387/branch/diagnostics', { method: 'POST' }),
   )
   const diagnosticsBody = await diagnostics.json()
-  assert.equal(diagnosticsBody.value.sessions, false)
+  assert.equal(diagnosticsBody.value.agents, false)
   assert.equal(diagnosticsBody.value.sessionController, false)
   assert.equal(diagnosticsBody.value.treeCount, 0)
 

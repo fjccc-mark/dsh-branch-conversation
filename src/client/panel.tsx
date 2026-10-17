@@ -548,8 +548,8 @@ export function BranchPanelPage({
         {report !== null ? (
           <ul className={cls.list}>
             <li>
-              会话存储服务 <code>ctx.sessions</code>：{flag(report.sessions)}
-              <span className={cls.hint}>（"无 seed + 有血缘"建子会话的通道）</span>
+              Agent 工厂 <code>ctx.agents</code>：{flag(report.agents)}
+              <span className={cls.hint}>（建子会话、让它落盘并出现在会话列表里的唯一正规通道）</span>
             </li>
             <li>
               会话控制面 <code>sessionController</code>：{flag(report.sessionController)}

@@ -29,7 +29,13 @@ async function harness(options = {}) {
   const root = options.root ?? (await mkdtemp(join(tmpdir(), 'branch-m4-')))
   const fake = createFakeSessions()
   const store = new TreeStore({ root })
-  const ctx = { sessions: fake.store, sessionController: fake.controller }
+  const ctx = {
+    agents: fake.agents,
+    sessions: fake.store,
+    sessionController: fake.controller,
+    agentPresets: fake.presets,
+    agentDefaultModel: fake.defaultModel,
+  }
   const service = new BranchService({ store, ctx, log: () => {} })
   let handler = null
   apply(
@@ -37,8 +43,11 @@ async function harness(options = {}) {
       logger: { info: () => {}, warn: () => {} },
       webServer: { register: (input) => ((handler = input.handler), () => {}) },
       effect: () => {},
+      agents: fake.agents,
       sessions: fake.store,
       sessionController: fake.controller,
+      agentPresets: fake.presets,
+      agentDefaultModel: fake.defaultModel,
     },
     Config({ storageRoot: root, http: true }),
   )
@@ -90,7 +99,8 @@ let child = null
 
 track('准备：父会话下建一个子分支', async () => {
   child = await h1.service.createBranch({ parentSessionId: 's-root', parentTurn: 1, prompt: '子问题' }, never)
-  assert.ok(child.sessionId.startsWith('session-fake-'), '应建出新会话')
+  // 走的是官方 Agent 工厂：id 形如 `session-<uuid>`（旧通道 `sessions.create` 会给 `session-<n>`）。
+  assert.match(child.sessionId, /^session-[0-9a-f-]{36}$/u, '应建出新会话')
 })
 
 track('场景1：删父会话后，树里出现孤儿节点（view 仍可读）', async () => {

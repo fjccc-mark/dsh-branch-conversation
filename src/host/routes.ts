@@ -16,7 +16,7 @@ export interface RouteDeps {
   readonly service: BranchService
   /** 已在场的能力（诊断用）。 */
   readonly capabilities: () => Promise<{
-    readonly sessions: boolean
+    readonly agents: boolean
     readonly sessionController: boolean
     readonly agentPresets: boolean
     readonly storage: { readonly root: string; readonly exists: boolean; readonly writable: boolean }

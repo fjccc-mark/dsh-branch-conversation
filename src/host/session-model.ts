@@ -6,6 +6,7 @@
  * @module dsh-branch-conversation/host/session-model
  */
 
+import { randomUUID } from 'node:crypto'
 import { serviceOf, type SessionFacts, type SessionTurnFact } from '../core/types.ts'
 
 /** 一个已完成轮次在会话事件流里的样子（只声明我们读的字段）。 */
@@ -13,6 +14,52 @@ interface RawEvent {
   readonly type?: string
   readonly seq?: number
   readonly data?: unknown
+}
+
+/**
+ * `ctx.agents`：**官方的 Agent 工厂面**，也是建会话的唯一正规通道。
+ *
+ * 为什么不能再用 `ctx.sessions.create()`（2026-10-17 真机实锤）：官方对 `sessions` 服务的描述原文是——
+ * "Persistence is intentionally not implemented here — the agent lifecycle attaches a session-log
+ * writer to each published session's write handle; **a session published outside that lifecycle
+ * persists nothing**"。也就是说：拿 `ctx.sessions.create()` 建出来的会话只是**内存里的一条记录**
+ * （id 还是 `session-<n>` 这种计数器号），既不会落盘、也不会出现在 `sessionController.list()` 里，
+ * 于是树上那个节点永远匹配不到任何真实会话——表现就是"节点建出来了但没挂上 / 子会话变成新根"。
+ */
+export interface AgentFactoryFace {
+  create: (options: {
+    readonly sessionId: string
+    readonly meta?: {
+      readonly cwd?: string
+      readonly parentSession?: string
+      readonly isSeeded?: boolean
+      readonly delegationDepth?: number
+      readonly agentPreset?: string
+    }
+    readonly agentOptions?: {
+      readonly provider?: string
+      readonly model?: string
+      readonly reasoningEffort?: string
+    }
+    readonly signal?: AbortSignal
+    /** 发布前的人设装配（官方 `sessionController.create` 同款：`presets.mount(agentCtx, presetId)`）。 */
+    readonly setup?: (agentCtx: unknown, agent: { readonly id?: string }) => unknown
+  }) => Promise<{ readonly agent?: { readonly id?: string } }>
+}
+
+/** `ctx.agentPresets`：人设/工具集/权限的载体。 */
+export interface AgentPresetsFace {
+  resolve: (id?: string) => Promise<{ readonly id?: string }>
+  mount: (ctx: unknown, id?: string) => Promise<unknown>
+}
+
+/** `ctx.agentDefaultModel`：官方新建会话时沿用的模型选择。 */
+export interface DefaultModelFace {
+  currentSelection: () => {
+    readonly provider?: string
+    readonly model?: string
+    readonly reasoningEffort?: string
+  }
 }
 
 /** host 侧可用的会话能力（全部按需探测，不写进 inject）。 */
@@ -33,33 +80,30 @@ export interface SessionModel {
     canOpenWorkspacePath?: () => boolean
     openWorkspacePath?: (request: { path: string }, signal: AbortSignal) => Promise<unknown>
   }
-  /**
-   * `ctx.sessions`：SessionStore 面，用来建"无 seed + 有血缘"的子会话。
-   * 同样必须带 `this` 调用（理由见上）。
-   */
-  readonly store: {
-    create: (id?: string, options?: unknown) => {
-      readonly header?: {
-        readonly id?: string
-        readonly cwd?: string
-        readonly parentSession?: string
-        readonly agentPreset?: string
-      }
-    }
-  }
+  /** Agent 工厂（建会话的正规通道）；缺失时建子会话降级为 `unsupported`。 */
+  readonly agents?: AgentFactoryFace
+  /** 人设注册表（继承父会话的 preset）；缺失时只建会话、不装配 preset。 */
+  readonly presets?: AgentPresetsFace
+  /** 默认模型选择（沿用官方"新建会话"的口径）；缺失时交给宿主默认值。 */
+  readonly defaultModel?: DefaultModelFace
 }
 
-/** 探测会话能力；任一面缺失都返回 null（调用方据此给出 `unsupported`）。 */export function sessionModelOf(ctx: unknown): SessionModel | null {
+/** 探测会话能力；控制面缺失时返回 null（调用方据此给出 `unsupported`）。 */export function sessionModelOf(ctx: unknown): SessionModel | null {
   // 必须走 serviceOf：真机上未 inject 的服务属性访问会抛，而不是给 undefined。
   const controller = serviceOf<Partial<SessionModel['controller']>>(ctx, 'sessionController')
-  const store = serviceOf<Partial<SessionModel['store']>>(ctx, 'sessions')
   if (controller?.list === undefined || controller.inspect === undefined) return null
-  if (store?.create === undefined) return null
+  const agents = serviceOf<AgentFactoryFace>(ctx, 'agents')
+  const presets = serviceOf<AgentPresetsFace>(ctx, 'agentPresets')
+  const defaultModel = serviceOf<DefaultModelFace>(ctx, 'agentDefaultModel')
   // 注意：这里**不**把方法摘出来，保留服务对象本身；调用方必须 `model.controller.list(...)`
   // 这样 `this` 才是服务对象（真机实测：摘出来裸调用会 undefined）。
   return {
     controller: controller as SessionModel['controller'],
-    store: store as SessionModel['store'],
+    ...(agents !== undefined && typeof agents.create === 'function' ? { agents } : {}),
+    ...(presets !== undefined && typeof presets.resolve === 'function' ? { presets } : {}),
+    ...(defaultModel !== undefined && typeof defaultModel.currentSelection === 'function'
+      ? { defaultModel }
+      : {}),
   }
 }
 
@@ -186,6 +230,8 @@ export interface CreateChildSessionInput {
   readonly cwd: string | null
   /** 人设 preset id（沿用父会话；决定工具集与提示词）。 */
   readonly agentPreset?: string
+  /** 调用方取消信号（透传给 Agent 工厂的初始化）。 */
+  readonly signal?: AbortSignal
 }
 
 /** 建子会话的结果。 */
@@ -197,32 +243,95 @@ export interface CreatedChildSession {
 /**
  * 建一条子会话：**不给 seed**（不继承任何对话内容），只写血缘与人设。
  *
- * 这是 B3 的正解：`seed` 才是复制历史的入口，`meta` 只写血缘与 preset。
- * 因此新会话的 `seedLength` 为 0，而 `parentSession` 指向父会话。
+ * 走 `ctx.agents.create()` 而不是 `ctx.sessions.create()`，理由是前者会跑**完整的会话生命周期**
+ * （`prepare` + `enter` + `announce`），持久化写入器就在这条生命周期上——见
+ * {@link AgentFactoryFace} 里的原文引用。只有走这条路，新建的子会话才会：
+ *   1. 真的落进 `$DSH_HOME/sessions/…`（重启后还在）；
+ *   2. 出现在 `sessionController.list()` 里（侧边栏/会话列表能看到、能打开）；
+ *   3. 拿到 `session-<uuid>` 这种**真实会话 id**，树上那个节点才匹配得上它。
+ *
+ * `setup` 与官方 `sessionController.create()` 完全同款：先 `agentPresets.resolve()` 定人设 id，
+ * 再在 `setup` 里 `presets.mount(agentCtx, id)` —— 这样工具集/权限/提示词与父会话一致（B3）。
+ *
  * @param model - 探测到的会话能力。
  * @param input - 父会话的事实。
  * @returns 新会话 id 与最终生效的 preset；失败时抛错（由调用方转成错误码）。
  */
-export function createChildSession(
+export async function createChildSession(
   model: SessionModel,
   input: CreateChildSessionInput,
-): CreatedChildSession {
-  const options: Record<string, unknown> = {
+): Promise<CreatedChildSession> {
+  const agents = model.agents
+  if (agents === undefined || typeof agents.create !== 'function') {
+    throw new Error('ctx.agents 不可用：这个部署没有 Agent 工厂，无法建出会落盘、可打开的子会话')
+  }
+  // 会话 id 自己铸：官方 `sessionController.create` 也是 `session-<randomUUID()>`。
+  const sessionId = `session-${randomUUID()}`
+  const presetId = await resolvePresetId(model, input.agentPreset)
+  const agentOptions = readAgentOptions(model)
+  const setup =
+    presetId === undefined || model.presets === undefined
+      ? undefined
+      : async (agentCtx: unknown): Promise<void> => {
+          await model.presets?.mount(agentCtx, presetId)
+        }
+  const handle = await agents.create({
+    sessionId,
+    ...(agentOptions !== undefined ? { agentOptions } : {}),
+    ...(input.signal !== undefined ? { signal: input.signal } : {}),
     meta: {
       ...(input.cwd !== null ? { cwd: input.cwd } : {}),
       parentSession: input.parentSessionId,
-      ...(input.agentPreset !== undefined ? { agentPreset: input.agentPreset } : {}),
+      // 不给 seed ⇒ 不继承上下文；`isSeeded: false` 与官方"新建会话"同款。
+      isSeeded: false,
+      delegationDepth: 0,
+      ...(presetId !== undefined ? { agentPreset: presetId } : {}),
     },
-  }
-  const session = model.store.create(undefined, options)
-  const header = session.header ?? {}
-  const sessionId = typeof header.id === 'string' ? header.id : null
-  if (sessionId === null) {
-    throw new Error('ctx.sessions.create 没有返回带 id 的会话头')
-  }
+    ...(setup !== undefined ? { setup } : {}),
+  })
+  const createdId =
+    typeof handle?.agent?.id === 'string' && handle.agent.id !== '' ? handle.agent.id : sessionId
   return {
-    sessionId,
-    ...(typeof header.agentPreset === 'string' ? { agentPreset: header.agentPreset } : {}),
+    sessionId: createdId,
+    ...(presetId !== undefined ? { agentPreset: presetId } : {}),
+  }
+}
+
+/** 解析最终生效的 preset id（与官方 `composeAgent` 一致：省略时取宿主默认 preset）。 */
+async function resolvePresetId(
+  model: SessionModel,
+  requested?: string,
+): Promise<string | undefined> {
+  if (model.presets === undefined) return requested
+  try {
+    const preset = await model.presets.resolve(requested)
+    return typeof preset?.id === 'string' && preset.id !== '' ? preset.id : requested
+  } catch {
+    // preset 解析失败不该拦住建会话：退回父会话的原值（工具集可能少一点，但有可读诊断）。
+    return requested
+  }
+}
+
+/** 官方新建会话时沿用的模型选择（取不到就交给宿主默认值）。 */
+function readAgentOptions(
+  model: SessionModel,
+): { provider?: string; model?: string; reasoningEffort?: string } | undefined {
+  if (model.defaultModel === undefined) return undefined
+  try {
+    const selection = model.defaultModel.currentSelection()
+    if (selection === undefined || selection === null) return undefined
+    const provider = typeof selection.provider === 'string' ? selection.provider : undefined
+    const name = typeof selection.model === 'string' ? selection.model : undefined
+    if (provider === undefined || name === undefined) return undefined
+    return {
+      provider,
+      model: name,
+      ...(typeof selection.reasoningEffort === 'string'
+        ? { reasoningEffort: selection.reasoningEffort }
+        : {}),
+    }
+  } catch {
+    return undefined
   }
 }
 

@@ -769,7 +769,7 @@ ${nodeHtml}
     <section aria-label="运行环境自检">
       <h3 class="dsh-branch-section-title">运行环境自检</h3>
       <ul class="dsh-branch-list">
-        <li>会话存储服务 <code>ctx.sessions</code>：可用 ✓</li>
+        <li>Agent 工厂 <code>ctx.agents</code>：可用 ✓</li>
         <li>会话控制面 <code>sessionController</code>：可用 ✓</li>
         <li>人设 preset <code>agentPresets</code>：可用 ✓</li>
         <li>存储根：<code>C:\\Users\\admin\\.dsh\\storages\\branch-conversation\\v1</code> · 存在 可用 ✓ · 可写 可用 ✓</li>

@@ -10,8 +10,8 @@ import { useEffect, useState } from 'react'
 
 /** host 诊断返回的能力报告（与 host 半的 CapabilityReport 对应）。 */
 export interface CapabilityReport {
-  /** `ctx.sessions`（SessionStore）是否在场。 */
-  readonly sessions: boolean
+  /** `ctx.agents`（官方 Agent 工厂）是否在场——建子会话的正规通道。 */
+  readonly agents: boolean
   /** `ctx.sessionController`（Remote 面）是否在场。 */
   readonly sessionController: boolean
   /** `ctx.agentPresets` 是否在场。 */

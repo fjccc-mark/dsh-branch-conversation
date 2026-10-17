@@ -81,7 +81,7 @@ track('/branch/diagnostics 返回 ok 信封与完整字段', async () => {
   const body = await response.json()
   assert.equal(body.ok, true, `信封异常：${JSON.stringify(body)}`)
   const value = body.value
-  assert.equal(typeof value.sessions, 'boolean')
+  assert.equal(typeof value.agents, 'boolean')
   assert.equal(typeof value.sessionController, 'boolean')
   assert.equal(typeof value.agentPresets, 'boolean')
   assert.equal(value.panelId, 'branch-conversation')
@@ -118,7 +118,7 @@ track('未 inject 的服务属性访问会抛错时，diagnostics 仍然可用�
     get: () => undefined,
   }
   // 模拟 Cordis：读未声明的服务属性时抛错。
-  for (const name of ['sessions', 'sessionController', 'agentPresets']) {
+  for (const name of ['agents', 'sessions', 'sessionController', 'agentPresets', 'agentDefaultModel']) {
     Object.defineProperty(throwingCtx, name, {
       get() {
         throw new Error(`cannot get property "${name}" without inject`)
@@ -133,7 +133,7 @@ track('未 inject 的服务属性访问会抛错时，diagnostics 仍然可用�
   assert.equal(response.status, 200, '服务探测抛错不应把 diagnostics 变成 500')
   const body = await response.json()
   assert.equal(body.ok, true, `信封异常：${JSON.stringify(body)}`)
-  assert.equal(body.value.sessions, false)
+  assert.equal(body.value.agents, false)
   assert.equal(body.value.sessionController, false)
   assert.equal(body.value.agentPresets, false)
 })

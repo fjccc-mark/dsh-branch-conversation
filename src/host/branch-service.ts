@@ -2,8 +2,11 @@
  * 分支服务：把 DSH 会话与插件自有树文档接起来。
  *
  * 关键约定（见 docs/分支对话插件·设计文档.md §2）：
- *   - 建子会话**不用 fork**：走 `ctx.sessions.create` 且**不给 seed**，只写
- *     `parentSession`（血缘）与 `agentPreset`（人设）→ 不继承上下文。
+ *   - 建子会话**不用 fork**：走官方的 Agent 工厂（`ctx.agents.create`）且**不给 seed**，
+ *     只写 `meta.parentSession`（血缘）与 `agentPreset`（人设）→ 不继承上下文。
+ *     **不能**用 `ctx.sessions.create`：那条路不属于 Agent 生命周期，官方明说
+ *     "a session published outside that lifecycle persists nothing"——建出来的会话不落盘、
+ *     不进会话列表，树上的节点就永远挂不上真实会话（真机缺陷 27）。
  *   - 锁的粒度是**每棵树**（锁键 = treeId）；升根拆分按 treeId 排序取两把锁，避免死锁。
  *   - 不写 DSH 会话日志、不改会话头、不做会话删除。
  * @module dsh-branch-conversation/host/branch-service
@@ -36,6 +39,9 @@ import {
 
 /** 建树时的初始标题。 */
 const DEFAULT_TITLE = '未命名对话'
+
+/** 新分支占位节点的标题（子会话还没提问时用它；跑完第一轮后换成「第 N 轮」）。 */
+const PLACEHOLDER_LABEL = '新分支（待提问）'
 
 /** 一句提问的长度上限（超出截断，避免树文档被塞爆）。 */
 export const MAX_PROMPT_LENGTH = 4000
@@ -95,7 +101,7 @@ export class BranchService {
     if (model === null) {
       throw new BranchFailure(
         'unsupported',
-        '此部署未同时提供 ctx.sessionController 与 ctx.sessions，本插件无法建子会话（功能已降级）',
+        '此部署未提供会话控制面（ctx.sessionController），本插件无法建子会话（功能已降级）',
       )
     }
     return model
@@ -210,6 +216,12 @@ export class BranchService {
     signal: AbortSignal,
   ): Promise<BranchCreateResult> {
     const model = this.model()
+    if (model.agents === undefined || typeof model.agents.create !== 'function') {
+      throw new BranchFailure(
+        'unsupported',
+        '此部署没有 Agent 工厂（ctx.agents），无法建出会落盘、可打开的子会话（功能已降级）',
+      )
+    }
     const parentSessionId = request.parentSessionId.trim()
     if (parentSessionId === '') throw new BranchFailure('invalid-request', '缺少 parentSessionId')
     if (!Number.isInteger(request.parentTurn) || request.parentTurn < 1) {
@@ -231,11 +243,14 @@ export class BranchService {
 
     const treeId = (await this.resolveTreeId(parentSessionId)) ?? newTreeId(parentSessionId)
 
-    // 1) 先建会话：无 seed（不继承上下文）+ parentSession（血缘）+ agentPreset（人设）。
-    const created = createChildSession(model, {
+    // 1) 先建会话：走官方 Agent 工厂（无 seed ⇒ 不继承上下文；parentSession ⇒ 血缘；
+    //    preset ⇒ 人设/工具集/权限）。**不能**用 ctx.sessions.create：那条路不落盘、不进
+    //    会话列表，树上的节点会永远匹配不到真实会话（真机缺陷 27，见 docs/进度快照.md §4.6）。
+    const created = await createChildSession(model, {
       parentSessionId,
       cwd: parentFacts.cwd,
       ...(parentFacts.agentPreset !== undefined ? { agentPreset: parentFacts.agentPreset } : {}),
+      signal,
     })
 
     // 2) 再在每棵树一把锁的队列里写树文档（新节点的 id 在锁内生成，保证同名幂等）。
@@ -246,21 +261,10 @@ export class BranchService {
       // 节点，否则树上只剩"最后一个轮次 + 新分支"，前面的对话凭空消失（M1 假会话面只有 1 轮，
       // 所以这个缺陷只在真机暴露）。
       const synced = this.syncTurns(document, parentSessionId, parentFacts.turns)
-      const existing = this.nodeOfSession(synced, parentSessionId)
+      // 挂载点必须是**用户点的那一轮**。早先这里取 `nodeOfSession()`（= 该会话的第一个 qa 节点），
+      // 于是在第 2 轮上建的分支会挂到第 1 轮下面——真机上看起来就是"节点出来了但没挂上"。
+      const parentNode = this.anchorNodeFor(synced, parentSessionId, request.parentTurn, parentFacts)
       const anchorSeq = parentFacts.turns.find((turn) => turn.turn === request.parentTurn)?.endSeq ?? null
-      const parentNode: BranchNode =
-        existing ?? {
-          id: `n-session-${parentSessionId}`,
-          sessionId: parentSessionId,
-          turn: parentFacts.turns.at(-1)?.turn ?? request.parentTurn,
-          anchorSeq: parentFacts.turns.at(-1)?.endSeq ?? null,
-          kind: 'qa',
-          label: labelFor(document, parentSessionId),
-          collapsed: false,
-          orphan: false,
-          children: [],
-          file: null,
-        }
 
       const childNode: BranchNode = {
         id: nodeId,
@@ -281,8 +285,8 @@ export class BranchService {
         children: unique([...(parentNode.children ?? []), childNode.id]),
       }
       return {
-        ...document,
-        root: { ...document.root, title: document.root.title || DEFAULT_TITLE },
+        ...synced,
+        root: { ...synced.root, title: synced.root.title || DEFAULT_TITLE },
         nodes: nodes.map((node) => (node.id === withChildren.id ? withChildren : node)),
       }
     })
@@ -306,6 +310,40 @@ export class BranchService {
   }
 
   /**
+   * 取"这一轮"对应的父节点；没有就补一个（例如该轮还没 `turn/end`、或顺手手填了下一轮）。
+   *
+   * @param document - 当前树文档。
+   * @param sessionId - 父会话。
+   * @param turn - 用户点的那一轮。
+   * @param facts - 父会话事实（用来取锚点 seq）。
+   * @returns 该轮对应的节点（已在 `document.nodes` 里时原样返回）。
+   */
+  private anchorNodeFor(
+    document: BranchTreeDocument,
+    sessionId: string,
+    turn: number,
+    facts: SessionFacts,
+  ): BranchNode {
+    const found = document.nodes.find(
+      (node) => node.sessionId === sessionId && node.kind === 'qa' && node.turn === turn,
+    )
+    if (found !== undefined) return found
+    const endSeq = facts.turns.find((fact) => fact.turn === turn)?.endSeq ?? null
+    return {
+      id: `n-session-${sessionId}-t${turn}`,
+      sessionId,
+      turn,
+      anchorSeq: endSeq,
+      kind: 'qa',
+      label: labelFor(document, sessionId, turn),
+      collapsed: false,
+      orphan: false,
+      children: [],
+      file: null,
+    }
+  }
+
+  /**
    * 把某个会话缺失的轮次补成节点（用于把已有对话接进树）。
    *
    * 幂等：同一轮次已有节点就不重复添加。
@@ -314,14 +352,11 @@ export class BranchService {
    */
   async adoptSession(sessionId: string, signal: AbortSignal): Promise<BranchTreeView> {
     const model = this.model()
-    const snapshot = await readSessionSnapshot(model, signal)
-    if (snapshot === null) throw new BranchFailure('unsupported', '无法读取会话列表（会话控制面不可用）')
-    if (!snapshot.ids.has(sessionId)) {
-      throw new BranchFailure('not-found', `会话 ${sessionId} 不存在或已被删除`)
-    }
     const facts = await inspectSession(model, sessionId, signal)
-    if (facts === null) throw new BranchFailure('not-found', `无法读取会话 ${sessionId} 的事实`)
-
+    if (facts === null) throw new BranchFailure('not-found', `会话 ${sessionId} 不存在或已被删除`)
+    // 只靠列表判存在会误杀"刚建、还没落盘"的子会话：真机上 `sessionController.list()` 读的是
+    // 已持久化的行，而刚通过 Agent 工厂建出来的会话在第一次 `session/event` 落盘前可能还不在列表里。
+    // 所以这里**以 inspect 为准**（它能读内存里的活会话），列表只留给孤儿判定用。
     const treeId = (await this.resolveTreeId(sessionId)) ?? newTreeId(sessionId)
     const write = await this.store.update(treeId, (current) => {
       const document = current ?? emptyTree(treeId, sessionId, facts)
@@ -348,21 +383,41 @@ export class BranchService {
     turns: readonly { readonly turn: number; readonly endSeq: number }[],
   ): BranchTreeDocument {
     const nodes = [...document.nodes]
+    // **占位节点先接第一个轮次**：`createBranch` 建出来的子节点是 `turn: null` 的占位（标题取首句
+    // 提问）。子会话的第一轮跑完后，若不认领占位而是再 push 一个"第 1 轮"，同一个会话就会有两个
+    // 节点（一个占位、一个真轮次）——真机上看到的是"新会话多出来一个孤零零的框"。
+    const placeholders = nodes
+      .filter((node) => node.sessionId === sessionId && node.kind === 'qa' && node.turn === null)
+      .map((node) => node.id)
     let latest = this.latestTurnOf(document, sessionId)
     for (const turn of turns) {
       if (latest !== null && turn.turn <= latest) continue
-      nodes.push({
-        id: this.nextNodeId(),
-        sessionId,
-        turn: turn.turn,
-        anchorSeq: turn.endSeq,
-        kind: 'qa',
-        label: `第 ${turn.turn} 轮`,
-        collapsed: false,
-        orphan: false,
-        children: [],
-        file: null,
-      })
+      const placeholderId = placeholders.shift()
+      const placeholder =
+        placeholderId === undefined ? undefined : nodes.find((node) => node.id === placeholderId)
+      if (placeholder !== undefined) {
+        const index = nodes.findIndex((node) => node.id === placeholder.id)
+        nodes[index] = {
+          ...placeholder,
+          turn: turn.turn,
+          anchorSeq: turn.endSeq,
+          // 占位标题是"新分支（待提问）"这种通用文案时换成轮次名；首句提问当标题的保持不动。
+          ...(placeholder.label === PLACEHOLDER_LABEL ? { label: `第 ${turn.turn} 轮` } : {}),
+        }
+      } else {
+        nodes.push({
+          id: this.nextNodeId(),
+          sessionId,
+          turn: turn.turn,
+          anchorSeq: turn.endSeq,
+          kind: 'qa',
+          label: `第 ${turn.turn} 轮`,
+          collapsed: false,
+          orphan: false,
+          children: [],
+          file: null,
+        })
+      }
       latest = turn.turn
     }
     return { ...document, nodes }
@@ -629,7 +684,7 @@ export class BranchService {
     readonly storageRoot: string
     readonly root: { readonly exists: boolean; readonly writable: boolean }
     readonly treeCount: number
-    readonly sessions: boolean
+    readonly agents: boolean
     readonly sessionController: boolean
     readonly agentPresets: boolean
   }> {
@@ -637,14 +692,14 @@ export class BranchService {
     const ids = (await this.store.listTreeIds()).filter((id) => id !== TREE_INDEX_ID)
     // 真机实测：未 inject 的服务属性访问会抛 `cannot get property "…" without inject`，
     // 所以探测一律走 serviceOf（永不抛），否则整条 diagnostics 会变成 500。
-    const sessions = serviceOf<{ create?: unknown }>(this.deps.ctx, 'sessions')
+    const agents = serviceOf<{ create?: unknown }>(this.deps.ctx, 'agents')
     const sessionController = serviceOf<{ list?: unknown }>(this.deps.ctx, 'sessionController')
     const agentPresets = serviceOf<{ resolve?: unknown }>(this.deps.ctx, 'agentPresets')
     return {
       storageRoot: this.store.storageRoot,
       root: probe,
       treeCount: ids.length,
-      sessions: typeof sessions?.create === 'function',
+      agents: typeof agents?.create === 'function',
       sessionController: typeof sessionController?.list === 'function',
       agentPresets: typeof agentPresets?.resolve === 'function',
     }
@@ -697,14 +752,18 @@ function unique(values: readonly string[]): string[] {
 }
 
 /** 节点标题：优先用已有标题，否则占位。 */
-function labelFor(document: BranchTreeDocument, sessionId: string): string {
-  const node = document.nodes.find((row) => row.sessionId === sessionId && row.kind === 'qa')
-  return node?.label ?? DEFAULT_TITLE
+function labelFor(document: BranchTreeDocument, sessionId: string, turn?: number): string {
+  const node = document.nodes.find(
+    (row) =>
+      row.sessionId === sessionId && row.kind === 'qa' && (turn === undefined || row.turn === turn),
+  )
+  if (node !== undefined) return node.label
+  return turn === undefined ? DEFAULT_TITLE : `第 ${turn} 轮`
 }
 
 /** 子会话首节点标题：用首句提问的首行，没有则占位。 */
 function labelForChild(prompt: string): string {
-  if (prompt === '') return '新分支（待提问）'
+  if (prompt === '') return PLACEHOLDER_LABEL
   const firstLine = prompt.split(/\r?\n/, 1)[0] ?? prompt
   return firstLine.length > 40 ? `${firstLine.slice(0, 40)}…` : firstLine
 }

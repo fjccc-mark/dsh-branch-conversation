@@ -110,7 +110,7 @@ export function apply(ctx: Context, config?: Partial<Config>): void {
     capabilities: async () => {
       const summary = await service.summary()
       return {
-        sessions: summary.sessions,
+        agents: summary.agents,
         sessionController: summary.sessionController,
         agentPresets: summary.agentPresets,
         storage: { root: summary.storageRoot, exists: summary.root.exists, writable: summary.root.writable },
