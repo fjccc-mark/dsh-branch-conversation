@@ -121,7 +121,11 @@ DeepSeek Harness（DSH）插件：在官方侧边栏中新增一个**「分支�
   否则看到的还是旧形态；复核项为 `F-3`/`F-4`/`F-8` 的截图与 DOM 片段。
 - **待人工核对的交互**：点节点切换、折叠持久化、文件节点（挂载/体检/系统程序打开）、三种导出按钮、孤儿升根。
 - **`F-6`/`F-7`**：与官方面板来回切换（缩放/滚动位置保持）与形态反例回归，需人工。
-- **桌面端未开始**：`desktop` profile 由 Electron 独占，需在应用内插件管理器安装后重载才能用上新产物。
+- **桌面端主干已跑通（2026-10-17）**：同一份产物经**应用内受管插件管线**装进 `desktop` profile 后热应用
+  （`application:"applied"`，**不用重启应用**）——侧边栏「分支对话」行、中央列页面、画布（14 框 / 13 线）、
+  `/branch/*`、运行环境自检、与网页端共用同一批树都已实测。余项：桌面端建子会话、系统默认程序开文件、
+  右栏页签；另外**改过 `lib/client.js` 之后要重载一次页面**（受管管线管"装"，不管"已加载的客户端模块"）。
+  详见 [测试文档 §11](docs/分支对话插件·测试文档.md) 与 [进度快照 §4.8](docs/进度快照.md)。
 - 键盘可达性人工核对、M5 的从零安装验证（排版与画布几何已由 `npm run layout-check` 自动兜住）。
 
 **真机测试环境**：本插件已装入 `web` profile（`dsh plugin --profile web add link:<仓库>`）；
@@ -153,7 +157,9 @@ dsh --profile branch-dev
 
 > **注意（本机实测）**：桌面应用使用的是 **Electron 独占的 `desktop` profile**，
 > CLI 对它报 `profile "desktop" is managed exclusively by the Electron application`。
-> 因此桌面端验证要走**应用内插件管理器**，CLI 路径只对自建 profile 有效。
+> 因此桌面端只能走**应用内插件管理器**（会话里的 `plugin_manager` 工具打的就是同一条受管管线
+> `ctx.pluginManager.installBundle`）：`link:<仓库绝对路径>` 装完**立即生效、不用重启应用**；
+> 但改过 `lib/client.js` 之后要重载一次页面。详见 [测试文档 §11](docs/分支对话插件·测试文档.md)。
 
 ## 开发
 

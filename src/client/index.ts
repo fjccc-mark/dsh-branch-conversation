@@ -27,7 +27,7 @@ import {
 } from './right-sidebar.ts'
 import { installSessionsFace, retrySessionsFace, useMainViewSessionId, type ClientSessions } from './use-main-session.ts'
 
-export { BranchCanvasView, BranchPanelIcon, BranchPanelPage } from './panel.tsx'
+export { BranchCanvasView, BranchPanelIcon, BranchPanelPage, downloadExport, saveTextFile } from './panel.tsx'
 export type { BranchPanelProps } from './panel.tsx'
 export {
   BRANCH_TAB_ID,

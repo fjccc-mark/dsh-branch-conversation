@@ -354,7 +354,12 @@ export function BranchPanelPage({
     onToggle,
   } = useBranchCanvasState(sessionId)
 
-  /** 导出：拿到内容后在浏览器侧落成文件（不依赖宿主写盘权限）。 */
+  /**
+   * 导出：先问 host 要文件名与字符数（用于状态行），再触发**下载**。
+   *
+   * 下载优先走 GET 下载地址（`branch/export?...`），Blob 只作兜底——桌面端实测见
+   * {@link downloadExport} 的注释：Blob 在 Electron 里会留下一个 `.tmp`。
+   */
   const onExport = useCallback(
     async (target: string, format: ExportFormat) => {
       const result = await branchApi.export(target, format)
@@ -363,8 +368,13 @@ export function BranchPanelPage({
         return
       }
       setFailure(null)
-      setStatus(`已导出 ${result.value.fileName}（${result.value.content.length} 字符）`)
+      if (downloadExport(target, format, result.value.fileName)) {
+        setStatus(`已开始下载 ${result.value.fileName}（${result.value.content.length} 字符）`)
+        return
+      }
+      // 拿不到 document（或下载地址不可用）时退回 Blob：网页端一直这么干，行为不变。
       saveTextFile(result.value.fileName, result.value.content)
+      setStatus(`已导出 ${result.value.fileName}（${result.value.content.length} 字符）`)
     },
     [],
   )
@@ -1018,8 +1028,62 @@ function noSessionReason(): string {
   return `目录里有 ${keys.length} 条会话，但没有一条被主区持有（retainedBy.mainView）`
 }
 
+/** 一次 `document` 里点击下载所需的最小面（测试注入用）。 */
+interface DownloadScope {
+  document?: {
+    createElement: (tag: string) => {
+      href: string
+      download: string
+      rel?: string
+      style?: { display: string }
+      click: () => void
+      remove?: () => void
+    }
+    body?: { appendChild: (node: unknown) => unknown }
+  }
+}
+
 /**
- * 在浏览器侧把文本存成文件。
+ * 用**下载地址**把一次导出落成文件（GET `branch/export?...`）。
+ *
+ * 为什么桌面端优先走这条路（2026-10-17 桌面端实测）：
+ * Electron 里走 Blob 时，Downloads 里会先出现一个 `<uuid>.tmp`（内容已写全），
+ * **约二十秒后**才改名成目标文件——网页端是直接落最终名的。原因是 Blob 路径点完立刻
+ * `revokeObjectURL`，正好卡在下载收尾之前，收尾只能等外壳自己慢慢确认。
+ *
+ * 改成让浏览器按 host 的下载地址流式下载（GET 路由已经带了 `content-disposition`），
+ * 既不依赖 Blob 生命周期，也不再有时序猜测；拿不到 `document` 时调用方退回 Blob。
+ * @param sessionId - 用它定位树。
+ * @param format - json / markdown / mermaid。
+ * @param fileName - 建议文件名（`download` 属性，host 的 content-disposition 里也有）。
+ * @returns 是否已经把下载发出去（拿不到 document 时为 false，调用方退回 Blob）。
+ */
+export function downloadExport(
+  sessionId: string,
+  format: ExportFormat,
+  fileName: string,
+): boolean {
+  const scope = globalThis as DownloadScope
+  const document = scope.document
+  if (document === undefined || typeof document.createElement !== 'function') return false
+  try {
+    const anchor = document.createElement('a')
+    anchor.href = branchApi.exportUrl(sessionId, format)
+    anchor.download = fileName
+    anchor.rel = 'noopener'
+    if (anchor.style !== undefined) anchor.style.display = 'none'
+    // 有的外壳只对"已挂到文档里"的锚点触发下载，所以挂上、点完再摘掉。
+    document.body?.appendChild(anchor)
+    anchor.click()
+    anchor.remove?.()
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 在浏览器侧把文本存成文件（兜底路径：`downloadExport` 发不出下载时才用）。
  *
  * 刻意不在 host 写盘：文件节点的语义是"引用原路径"，而导出是**用户主动下载**，
  * 走浏览器下载既不需要宿主写权限，也不会在用户不知情时留下文件。
@@ -1030,7 +1094,7 @@ export function saveTextFile(fileName: string, content: string): boolean {
   const scope = globalThis as {
     Blob?: typeof Blob
     URL?: { createObjectURL?: (blob: Blob) => string; revokeObjectURL?: (url: string) => void }
-    document?: { createElement: (tag: string) => { href: string; download: string; click: () => void } }
+    document?: DownloadScope['document']
   }
   if (scope.Blob === undefined || scope.URL?.createObjectURL === undefined || scope.document === undefined) {
     return false
@@ -1040,8 +1104,26 @@ export function saveTextFile(fileName: string, content: string): boolean {
     const anchor = scope.document.createElement('a')
     anchor.href = url
     anchor.download = fileName
+    anchor.rel = 'noopener'
+    if (anchor.style !== undefined) anchor.style.display = 'none'
+    scope.document.body?.appendChild(anchor)
     anchor.click()
-    scope.URL.revokeObjectURL?.(url)
+    anchor.remove?.()
+    // **不能立刻 revoke**：Electron 里下载还没收尾就被取消，Downloads 里会长时间停着
+    // 一个 `<uuid>.tmp`（实测约二十秒后才改名成目标文件）。延迟撤销避免这段时序抖动。
+    const revoke = scope.URL.revokeObjectURL
+    if (typeof revoke === 'function') {
+      const timer = (globalThis as { setTimeout?: (fn: () => void, ms: number) => unknown }).setTimeout
+      if (typeof timer === 'function') {
+        timer(() => {
+          try {
+            revoke.call(scope.URL, url)
+          } catch {
+            // 撤销失败不影响已经开始的下载。
+          }
+        }, 60_000)
+      }
+    }
     return true
   } catch {
     return false
