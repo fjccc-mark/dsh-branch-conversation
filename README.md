@@ -141,9 +141,18 @@ DeepSeek Harness（DSH）插件：在官方侧边栏中新增一个**「分支�
 | 形态 | 纯本地插件，**无遥测、无外部网络请求** |
 | 语言 | 界面与文档先只写中文（结构上留了 locale 扩展位） |
 
-## 安装（自测）
+## 安装
 
-本插件尚未发布 npm。开发期用 `link:` 安装到**临时 profile**（profile 由 `dsh plugin` 自动创建，
+**从 npm 安装（普通用户）**——包名 `dsh-branch-conversation`，运行时要求 DSH `>= 0.2.0-rc.2`：
+
+```sh
+dsh plugin --profile <profile> add dsh-branch-conversation
+```
+
+也可以走应用内**插件页 →添加插件**→ 填包名。桌面端使用的是 Electron 独占的 `desktop` profile，
+只能用应用内那条受管管线（见下方注意）。
+
+**开发期用 `link:` 安装到临时 profile**（profile 由 `dsh plugin` 自动创建，
 不存在时 `--dump-config` 会直接报 `profile "…" does not exist`，属于预期）：
 
 ```sh
