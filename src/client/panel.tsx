@@ -85,6 +85,14 @@ export interface BranchPanelProps {
   readonly onOpenRight?: (() => void) | undefined
   /** 按钮不可用时的可读原因；空串表示可用。 */
   readonly rightReason?: string
+  /**
+   * M7.2：上一次点「在右侧打开」失败时的提示（例如 hero 屏没有会话面）。
+   *
+   * 为什么要提示：`retainedBy.mainView` 在 hero 屏仍记着上一次会话，所以我们**点之前**分不出
+   * "有会话面"与"没有会话面"；那时点下去会被官方拒绝（`openTab` 抛）。静默失败最难查，
+   * 所以这里把结果如实说给用户听，并告诉他可以怎么做。
+   */
+  readonly rightNotice?: string | null
 }
 
 /** 侧边栏行图标：官方 shell 给尺寸与选中态，本组件只画图形。 */
@@ -306,6 +314,7 @@ export function BranchPanelPage({
   sessionId = null,
   onOpenRight,
   rightReason = '这个部署没有官方右侧详情列（sidebarRight 服务不可用）',
+  rightNotice = null,
 }: BranchPanelProps = {}): ReactNode {
   const { report, error, pending } = useCapabilityReport()
   const [branchFrom, setBranchFrom] = useState<TreeBox | null>(null)
@@ -486,6 +495,11 @@ export function BranchPanelPage({
       ) : null}
       {failure !== null ? <p className={cls.warn}>{failure}</p> : null}
       {status !== null ? <p className={cls.muted}>{status}</p> : null}
+      {rightNotice !== null && rightNotice !== '' ? (
+        <p className={cls.warn} data-dsh-branch-right-notice="">
+          {rightNotice}
+        </p>
+      ) : null}
 
       <section aria-label="分支树">
         <h3 className={cls.sectionTitle}>

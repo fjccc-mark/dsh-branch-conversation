@@ -551,27 +551,35 @@ try {
     `按了官方键位但没看到右侧栏：panel=${afterHotkey.panel} expand=${afterHotkey.expand}`,
   )
   check(
-    '**F-9**：官方**引导页**里列出了「分支对话」入口（`guide` 字段生效）',
-    afterHotkey.guideEntries.some((text) => text.includes('分支对话')),
-    `引导页条目里没有我们：${JSON.stringify(afterHotkey.guideEntries)}`,
+    '**F-9**：`guide` 注册生效——右侧栏要么在引导页列出「分支对话」，要么已经直接打开了它',
+    afterHotkey.guideEntries.some((text) => text.includes('分支对话')) || afterHotkey.ourSidebarView >= 1,
+    `引导页条目 ${JSON.stringify(afterHotkey.guideEntries)}，我们的页签 ${afterHotkey.ourSidebarView} 个`,
   )
+
+  // 官方规则补齐：**"引导页只有一条入口时，新窗格直接开那一条"**（README：*Exactly one entry opens its page
+  // directly; zero or multiple entries open the guide*）。所以这里可能出现两种都正确的形态：
+  //   ① 引导页列出我们的卡片（入口 ≥2 条时）；② 右侧栏已经直接是我们的页签（当时只有我们一条）。
+  // 早先的断言只认 ①，于是在"我们恰好是唯一入口"的那一轮误报（实测踩过）。
+  const openedDirectly = afterHotkey.ourSidebarView >= 1 && afterHotkey.guideEntries.length === 0
+  if (openedDirectly) {
+    console.log('      说明：右侧栏直接打开了我们的页签（当时只有一条引导页入口，官方"唯一入口直接开"规则）')
+  }
 
   // 点引导页上的入口 → 应该把我们的页签开进右侧栏。
   const clickedGuideEntry = await evaluate(`(() => {
     const entry = [...document.querySelectorAll('[data-sidebar-right-guide-entry]')]
       .find(el => (el.textContent || '').includes('分支对话'))
-    if (entry === undefined) return false
+    if (entry === undefined) return 'no-entry'
     ;(entry.closest('button,[role="button"],a') ?? entry).click()
-    return true
+    return 'clicked'
   })()`)
   await new Promise((done) => setTimeout(done, CLICK_SETTLE_MS * 2))
   const afterGuideOpen = await rightBarState()
   console.log(
-    `      点引导页入口后：页签 ${JSON.stringify(afterGuideOpen.tabs)}，右侧栏画布 ${afterGuideOpen.ourCanvas} 个 / 框 ${afterGuideOpen.ourNodes} 个`,
+    `      引导页入口：${clickedGuideEntry}；之后页签 ${JSON.stringify(afterGuideOpen.tabs)}，右侧栏画布 ${afterGuideOpen.ourCanvas} 个 / 框 ${afterGuideOpen.ourNodes} 个`,
   )
-  check('能点到引导页上的「分支对话」入口', clickedGuideEntry === true)
   check(
-    '**F-9**：点引导页入口后，右侧栏里渲染出本插件的画布',
+    '**F-9**：（引导页路径可用或已直接打开）右侧栏里渲染出本插件的画布',
     afterGuideOpen.ourSidebarView >= 1 && (afterGuideOpen.ourCanvas >= 1 || afterGuideOpen.ourEmpty >= 1),
     `右侧栏里没有我们的画布：view=${afterGuideOpen.ourSidebarView} canvas=${afterGuideOpen.ourCanvas}`,
   )
@@ -660,6 +668,241 @@ try {
   await writeFile(shot2, Buffer.from(image2.data, 'base64'))
   console.log(`      截图：${shot2}`)
 
+  // ---------------------------------------------------------------------------
+  // F-11：在**右侧页签里**操作（缩放 / 折叠），行为与左侧一致
+  // ---------------------------------------------------------------------------
+  console.log('\n=== F-11：在右侧页签里操作 ===')
+  // 先回到对话、开右侧栏、点引导页入口（F-9 的路径），把右栏画面准备好。
+  await evaluate(`(() => {
+    const rows = [...document.querySelectorAll('div[class*="_sessionRow"]')]
+    const withHistory = rows.filter((row) => row.querySelector('span[class*="_time"]') !== null)
+    if (withHistory.length > 0) withHistory[0].click()
+    return true
+  })()`)
+  await new Promise((done) => setTimeout(done, CLICK_SETTLE_MS))
+  await evaluate(`(() => { document.body.click(); return true })()`)
+  await pressKey('KeyB', 2 | 8, 'b', 66)
+  await new Promise((done) => setTimeout(done, CLICK_SETTLE_MS))
+  // 如果我们的页签已经开着就直接用它；否则点引导页入口。
+  const ensured = await evaluate(`(() => {
+    if (document.querySelectorAll('[data-dsh-branch-sidebar-view]').length > 0) return 'already'
+    const entry = [...document.querySelectorAll('[data-sidebar-right-guide-entry]')]
+      .find(el => (el.textContent || '').includes('分支对话'))
+    if (entry === undefined) return 'no-entry'
+    ;(entry.closest('button,[role="button"],a') ?? entry).click()
+    return 'clicked'
+  })()`)
+  await new Promise((done) => setTimeout(done, CLICK_SETTLE_MS * 2))
+  console.log(`      右栏页签准备：${ensured}`)
+
+  /** 读右侧页签里我们画布的缩放与框数。 */
+  const rightPaneState = async () =>
+    JSON.parse(
+      await evaluate(`JSON.stringify({
+        view: document.querySelectorAll('[data-dsh-branch-sidebar-view]').length,
+        zoom: document.querySelector('[data-dsh-branch-sidebar-view] [data-dsh-branch-zoom]')?.getAttribute('data-dsh-branch-zoom') ?? null,
+        nodes: document.querySelectorAll('[data-dsh-branch-sidebar-view] [data-dsh-branch-node]').length,
+        collapsedMarks: document.querySelectorAll('[data-dsh-branch-sidebar-view] [data-dsh-branch-node][data-dsh-branch-collapsed="true"]').length
+      })`),
+    )
+
+  const paneBefore = await rightPaneState()
+  console.log(`      操作前：缩放 ${paneBefore.zoom}，框 ${paneBefore.nodes} 个`)
+
+  // (a) 右侧页签里点缩放——与左侧同一个按钮（共用组件）。
+  //     先把缩放归到 100%，否则可能已经在上限（实测第一次就撞了 200% 上限，按钮 disabled 被判"点不到"）。
+  await evaluate(`(() => {
+    const btn = [...document.querySelectorAll('[data-dsh-branch-sidebar-view] button')]
+      .find(b => (b.textContent || '').trim() === '100%')
+    if (btn !== null) btn.click()
+    return true
+  })()`)
+  await new Promise((done) => setTimeout(done, 900))
+  const paneReset = await rightPaneState()
+
+  const zoomClicked = await evaluate(`(() => {
+    const btn = document.querySelector('[data-dsh-branch-sidebar-view] button[aria-label="放大画布"]')
+    if (btn === null || btn.disabled) return false
+    btn.click()
+    return true
+  })()`)
+  await new Promise((done) => setTimeout(done, 900))
+  const paneZoomed = await rightPaneState()
+  check(
+    '**F-11**：右侧页签里能缩放（与左侧同一个画布组件）',
+    zoomClicked === true && paneZoomed.zoom !== null && paneZoomed.zoom !== paneReset.zoom,
+    `先归到 ${paneReset.zoom}，放大按钮 ${zoomClicked ? '点到' : '点不到'}；缩放 ${paneReset.zoom} → ${paneZoomed.zoom}`,
+  )
+
+  // (b) 右侧页签里点一个折叠把手——树文档只有一份，折叠后可见框数应变化。
+  //     第一个框可能没有子节点（点了也没变化），所以最多试 3 个把手，任一让框数变化即通过。
+  const collapseAttempts = []
+  let paneCollapsed = await rightPaneState()
+  for (let index = 0; index < 3; index += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    const clickedHandle = await evaluate(`(() => {
+      const handles = [...document.querySelectorAll('[data-dsh-branch-sidebar-view] button[class*="node-handle"]')]
+      const handle = handles[${index}]
+      if (handle === undefined) return false
+      handle.click()
+      return true
+    })()`)
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((done) => setTimeout(done, 1500))
+    // eslint-disable-next-line no-await-in-loop
+    const now = await rightPaneState()
+    collapseAttempts.push(`${clickedHandle ? '点了' : '无'}第 ${index + 1} 个把手 → 框 ${now.nodes}`)
+    if (now.nodes !== paneBefore.nodes || now.collapsedMarks > 0) {
+      paneCollapsed = now
+      break
+    }
+  }
+  console.log(`      折叠尝试：${collapseAttempts.join('；')}；折叠标记 ${paneCollapsed.collapsedMarks}`)
+  check(
+    '**F-11**：右侧页签里能折叠（框数变化或有折叠标记）——树文档只有一份，两侧看到同一棵树',
+    paneCollapsed.nodes !== paneBefore.nodes || paneCollapsed.collapsedMarks > 0,
+    `点把手后框数仍是 ${paneCollapsed.nodes}（操作前 ${paneBefore.nodes}）、折叠标记 ${paneCollapsed.collapsedMarks}`,
+  )
+
+  // 还原折叠，别把树留在折叠态影响后面的用例。
+  await evaluate(`(() => {
+    const handles = [...document.querySelectorAll('[data-dsh-branch-sidebar-view] button[class*="node-handle"]')]
+    if (handles.length > 0) handles[0].click()
+    return true
+  })()`)
+  await new Promise((done) => setTimeout(done, 1200))
+
+  // ---------------------------------------------------------------------------
+  // F-13：亮/暗两种 prefers-color-scheme 下画布配色跟随宿主题（token 生效）
+  // ---------------------------------------------------------------------------
+  console.log('\n=== F-13：亮/暗主题配色 ===')
+
+  /** 读节点框的**计算后**背景色与边框色（token 生效则两种主题下不同）。 */
+  const themeColors = async () =>
+    JSON.parse(
+      await evaluate(`JSON.stringify((() => {
+        const node = document.querySelector('[data-dsh-branch-sidebar-view] [data-dsh-branch-node]')
+          ?? document.querySelector('[data-dsh-branch-node]')
+        const canvas = document.querySelector('[data-dsh-branch-canvas]')
+        if (node === null) return { missing: true }
+        const nodeStyle = getComputedStyle(node)
+        const canvasStyle = canvas === null ? null : getComputedStyle(canvas)
+        return {
+          nodeBg: nodeStyle.backgroundColor,
+          nodeBorder: nodeStyle.borderTopColor,
+          canvasBg: canvasStyle === null ? null : canvasStyle.backgroundColor,
+          bodyBg: getComputedStyle(document.body).backgroundColor
+        }
+      })())`),
+    )
+
+  const setScheme = async (value) => {
+    await cdp.send(
+      'Emulation.setEmulatedMedia',
+      { features: [{ name: 'prefers-color-scheme', value }] },
+      session,
+    )
+    await new Promise((done) => setTimeout(done, 1200))
+  }
+
+  await setScheme('light')
+  const lightColors = await themeColors()
+  const lightShot = resolve(OUT_DIR, 'theme-light.png')
+  const lightImage = await cdp.send('Page.captureScreenshot', { format: 'png' }, session)
+  await writeFile(lightShot, Buffer.from(lightImage.data, 'base64'))
+
+  await setScheme('dark')
+  const darkColors = await themeColors()
+  const darkShot = resolve(OUT_DIR, 'theme-dark.png')
+  const darkImage = await cdp.send('Page.captureScreenshot', { format: 'png' }, session)
+  await writeFile(darkShot, Buffer.from(darkImage.data, 'base64'))
+
+  console.log(`      亮色：节点底 ${lightColors.nodeBg}、边框 ${lightColors.nodeBorder}、body ${lightColors.bodyBg}`)
+  console.log(`      暗色：节点底 ${darkColors.nodeBg}、边框 ${darkColors.nodeBorder}、body ${darkColors.bodyBg}`)
+  check(
+    '**F-13**：画布配色**跟随宿主主题**（亮/暗两态下计算色不同）',
+    lightColors.missing !== true &&
+      darkColors.missing !== true &&
+      lightColors.nodeBg !== darkColors.nodeBg,
+    `亮色节点底 ${lightColors.nodeBg} vs 暗色 ${darkColors.nodeBg}` +
+      (lightColors.nodeBg === darkColors.nodeBg ? '（相同 → 说明还在用硬编码色，token 没生效）' : ''),
+  )
+  console.log(`      截图：${lightShot} / ${darkShot}`)
+
+  // 恢复系统默认配色，避免影响后续（这里已到末尾，恢复只是为了干净）。
+  await cdp.send('Emulation.setEmulatedMedia', { features: [] }, session).catch(() => {})
+
+  // ---------------------------------------------------------------------------
+  // F-12：没有会话时（hero 屏）按钮必须禁用并说明原因（官方：无会话时 openTab 会抛）
+  // ---------------------------------------------------------------------------
+  console.log('\n=== F-12：无会话（hero 屏）时的降级 ===')
+  // 「新会话」会回到 hero 屏（没有选中的会话）。点它之后再打开我们的页面。
+  const newSessionClicked = await evaluate(`(() => {
+    const row = [...document.querySelectorAll('button,[role="button"],li,a')]
+      .find(el => (el.textContent || '').trim().startsWith('新会话'))
+    if (row === undefined) return false
+    row.click()
+    return true
+  })()`)
+  await new Promise((done) => setTimeout(done, CLICK_SETTLE_MS * 2))
+  await evaluate(`(() => {
+    const icon = document.querySelector('[data-dsh-panel-entry="branch-conversation"]')
+    if (icon === null) return false
+    ;(icon.closest('button,[role="button"],li,a') ?? icon).click()
+    return true
+  })()`)
+  await new Promise((done) => setTimeout(done, CLICK_SETTLE_MS * 2))
+
+  const heroState = JSON.parse(
+    await evaluate(`JSON.stringify({
+      onPage: document.querySelectorAll('[data-dsh-branch-view]').length,
+      hasButton: document.querySelectorAll('[data-dsh-branch-open-right]').length,
+      disabled: document.querySelector('[data-dsh-branch-open-right]')?.disabled ?? null,
+      title: document.querySelector('[data-dsh-branch-open-right]')?.getAttribute('title') ?? null,
+      pluginFailed: (globalThis.__DSH_BRANCH__ ?? null)?.failed === true
+    })`),
+  )
+  console.log(
+    `      hero 屏：插件页 ${heroState.onPage} 个，按钮 ${heroState.hasButton} 个，disabled=${heroState.disabled}，title=${JSON.stringify(heroState.title)}`,
+  )
+
+  // 点一下：**不能崩**，且失败时要给用户提示（我们无法在点之前区分 hero 屏与全局面板，
+  // 因为 `retainedBy.mainView` 在 hero 屏仍记着上一次会话）。
+  const heroClicked = await evaluate(`(() => {
+    const btn = document.querySelector('[data-dsh-branch-open-right]')
+    if (btn === null) return 'no-button'
+    if (btn.disabled) return 'disabled'
+    btn.click()
+    return 'clicked'
+  })()`)
+  await new Promise((done) => setTimeout(done, CLICK_SETTLE_MS))
+  const heroAfter = JSON.parse(
+    await evaluate(`JSON.stringify({
+      onPage: document.querySelectorAll('[data-dsh-branch-view]').length,
+      notice: document.querySelector('[data-dsh-branch-right-notice]')?.textContent ?? null,
+      ourSidebarView: document.querySelectorAll('[data-dsh-branch-sidebar-view]').length,
+      pluginFailed: (globalThis.__DSH_BRANCH__ ?? null)?.failed === true
+    })`),
+  )
+  console.log(`      点击结果：${heroClicked}；提示 ${JSON.stringify(heroAfter.notice)}；右侧栏画布 ${heroAfter.ourSidebarView} 个`)
+  check(
+    '**F-12**：无会话面时点「在右侧打开」**不崩**（要么禁用，要么给出可读提示）',
+    heroState.pluginFailed === false &&
+      heroAfter.pluginFailed === false &&
+      (heroClicked === 'disabled' || (heroAfter.notice ?? '').length > 0 || heroAfter.ourSidebarView >= 1),
+    `点击=${heroClicked}、提示=${JSON.stringify(heroAfter.notice)}、failed=${heroAfter.pluginFailed}`,
+  )
+  check(
+    '**F-12**：失败时把原因说给用户（不静默失败）',
+    heroClicked === 'disabled' || (heroAfter.notice ?? '').length > 0 || heroAfter.ourSidebarView >= 1,
+    `点了之后既没提示也没开出来：notice=${JSON.stringify(heroAfter.notice)}`,
+  )
+
+  const heroShot = resolve(OUT_DIR, 'real-machine-hero.png')
+  const heroImage = await cdp.send('Page.captureScreenshot', { format: 'png' }, session)
+  await writeFile(heroShot, Buffer.from(heroImage.data, 'base64'))
+  console.log(`      截图：${heroShot}`)
+
   await cdp.send('Target.closeTarget', { targetId: target.targetId }).catch(() => {})
   console.log(failures.length === 0 ? '\n插件在真机上正常 ✓' : `\n${failures.length} 项不通过 ✗`)
   process.exitCode = failures.length === 0 ? 0 : 1
@@ -670,6 +913,10 @@ try {
 } finally {
   cdp?.close()
   child.kill()
-  await new Promise((done) => setTimeout(done, 800))
-  await rm(profileDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 400 }).catch(() => {})
+  clearTimeout(hardStop)
+  // ⚠️ **不要在这里等浏览器收尾**：真机上 `child.kill()` 之后浏览器进程可能挂很久，
+  // 历史上有两次就是"结果都打完了，卡在收尾"直到硬超时才退出。
+  // 结论已经打印完毕，这里直接结束进程；profile 目录交给下一次运行时清理（开头有 rm）。
+  setTimeout(() => process.exit(process.exitCode ?? 0), 50).unref?.()
+  process.exit(process.exitCode ?? 0)
 }

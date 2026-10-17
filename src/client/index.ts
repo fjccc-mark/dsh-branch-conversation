@@ -12,6 +12,7 @@
  */
 
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import { useState } from 'react'
 import { BRANCH_PANEL_ID } from '../core/types.ts'
 import { installNavigation, retryNavigation } from './navigation.ts'
 import { BranchCanvasView, BranchPanelIcon, BranchPanelPage } from './panel.tsx'
@@ -337,11 +338,20 @@ function applyOrThrow(ctx: ClientContext): void {
   const Page = (): ReturnType<typeof BranchPanelPage> => {
     const sessionId = useMainViewSessionId()
     const right = readRightSidebar()
+    // 点「在右侧打开」失败时的提示。为什么需要它：`retainedBy.mainView` 在 hero 屏仍记着
+    // 上一次会话，所以**点之前**分不清"有没有会话面"；点下去被官方拒绝时要如实告诉用户。
+    const [rightNotice, setRightNotice] = useState<string | null>(null)
     return BranchPanelPage({
       sessionId,
+      rightNotice,
       onOpenRight: () => {
+        setRightNotice(null)
         // 先切回对话再开页签：官方右侧栏只在"会话占着中央列"时有会话面（见 openBranchTab 注释）。
-        openBranchTab(right, sessionId, readLayout())
+        openBranchTab(right, sessionId, readLayout(), undefined, () => {
+          setRightNotice(
+            '右侧详情列这次没能打开：它需要先有正在显示的对话。请先在左侧选一个会话再点一次。',
+          )
+        })
       },
       // 空串 = 可用；否则是禁用原因（服务缺失 / 没有会话），直接进按钮的 title。
       rightReason:

@@ -228,6 +228,14 @@ export function openBranchTab(
     // 所以等一拍（50ms）再开页签最稳；实测同步连调会抛。
     setTimeout(run, 50)
   },
+  /**
+   * 两次都没开成时的回调（可选）。
+   *
+   * 为什么需要：有些状态下面**看起来**有会话（`retainedBy.mainView` 还记着上一次的会话），
+   * 但右侧栏其实没有会话面（例如 hero 屏）。此时我们**无法在点之前**判断，
+   * 只能"试一下、失败就告诉用户"，而不是静默什么都不发生。
+   */
+  onGiveUp?: () => void,
 ): boolean {
   if (!canOpenBranchTab(right, sessionId)) return false
 
@@ -243,7 +251,12 @@ export function openBranchTab(
       try {
         right?.openTab(BRANCH_TAB_KIND)
       } catch {
-        // 放弃：用户仍可以自己按 Ctrl+Shift+B 打开右侧栏。
+        // 放弃，但**告诉用户**（静默失败最难查）。
+        try {
+          onGiveUp?.()
+        } catch {
+          // 回调本身出错也不能影响页面。
+        }
       }
     }
   }
