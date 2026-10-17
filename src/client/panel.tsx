@@ -16,7 +16,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ChangeEvent, ReactElement, ReactNode, RefObject, WheelEvent } from 'react'
-import { branchApi, type BranchCreateValue, type BranchTreeView } from './branch-api.ts'
+import { branchApi, type BranchAttachValue, type BranchCreateValue, type BranchTreeView } from './branch-api.ts'
 import { useCapabilityReport } from './capability.ts'
 import { jumpToTurn } from './jump-to-turn.ts'
 import { loadSessionThrough, openSessionById, subscribeNavigationReady } from './navigation.ts'
@@ -407,6 +407,16 @@ export function BranchPanelPage({
     [refresh],
   )
 
+  /** 挂文件成功后：关表单、给一句可读反馈、把树重读一遍（新框要出现）。 */
+  const attached = useCallback(
+    async (value: BranchAttachValue) => {
+      setBranchFrom(null)
+      setStatus(`已挂文件节点：${value.path}（点这个框会用系统默认程序打开）`)
+      await refresh(sessionId)
+    },
+    [refresh, sessionId],
+  )
+
   return (
     <div className={cls.page} ref={pageRef} data-dsh-branch-view="" data-dsh-plugin="branch-conversation">
       <header className={cls.header}>
@@ -564,9 +574,11 @@ export function BranchPanelPage({
         <BranchCreateForm
           parentLabel={branchFrom.label}
           parentSessionId={branchFrom.sessionId}
+          parentNodeId={branchFrom.id}
           defaultTurn={branchFrom.turn ?? 1}
           onCancel={() => setBranchFrom(null)}
           onCreated={created}
+          onAttached={attached}
         />
       ) : null}
 
@@ -689,8 +701,8 @@ function BranchCanvas({
  *
  * 右侧栏比中央列窄得多（默认约 320~420px），所以：
  *   - 画布高度改成**撑满容器**（而不是页面那种 `62vh`），窄栏里纵向空间更值钱；
- *   - 点「＋」建分支时用**紧凑表单**（`BranchCreateForm compact`）：只有标题、一句轮次说明、
- *     两行提问框与两个按钮——轮次固定为被点的那个框，所以不摆轮次输入框（窄栏也放得下）。
+ *   - 点「＋」建分支/挂文件时用**紧凑表单**（`BranchCreateForm compact`）：只有"建子会话 / 挂文件"两个页签、
+ *     一句说明、输入框与两个按钮——挂载点固定为被点的那个框，所以不摆轮次输入框（窄栏也放得下）。
  *
  * @param props.sessionId - 该页签所属会话（框架按 session 作用域给出）。
  */
@@ -728,6 +740,16 @@ export function BranchCanvasView({
       await refresh(value.sessionId)
     },
     [refresh],
+  )
+
+  /** 挂文件成功后就地刷新（同 `BranchPanelPage`）。 */
+  const attached = useCallback(
+    async (value: BranchAttachValue) => {
+      setBranchFrom(null)
+      setNotice(`已挂文件节点：${value.path}（点这个框会用系统默认程序打开）`)
+      await refresh(sessionId)
+    },
+    [refresh, sessionId],
   )
 
   return (
@@ -790,9 +812,11 @@ export function BranchCanvasView({
           compact
           parentLabel={branchFrom.label}
           parentSessionId={branchFrom.sessionId}
+          parentNodeId={branchFrom.id}
           defaultTurn={branchFrom.turn ?? 1}
           onCancel={() => setBranchFrom(null)}
           onCreated={created}
+          onAttached={attached}
         />
       ) : null}
       {layout.nodes.length === 0 ? (
@@ -872,7 +896,7 @@ function NodeBox({
           <button
             type="button"
             className={cls.nodePlus}
-            title="在这个节点上提新问题（建子会话）"
+            title="在这个节点下：提新问题建子会话 / 挂一个文件节点"
             onClick={() => onBranch(box)}
           >
             ＋
@@ -902,33 +926,65 @@ function NodeBox({
 }
 
 /** 建分支的表单（由节点上的「＋」唤起）。 */
-function BranchCreateForm({
+/**
+ * 节点上的表单（由「＋」唤起）：两种在这个节点下加东西的方式。
+ *
+ *   - **建子会话**（裁决 A2/B3）：提问 → 新会话，不继承上下文，只继承人设/权限；
+ *   - **挂文件**（裁决 A3）：只记原路径，不复制、不读内容；点文件框用系统默认程序打开。
+ *
+ * 两者都挂在**被点的那个节点**下，所以共用一张表单：`parentNodeId` 决定挂载点，
+ * 切页签只换"提交时调哪个接口"。
+ */
+export function BranchCreateForm({
   parentLabel,
   parentSessionId,
+  parentNodeId,
   defaultTurn,
   onCancel,
   onCreated,
+  onAttached,
   compact = false,
 }: {
   parentLabel: string
   parentSessionId: string
+  parentNodeId: string
   defaultTurn: number
   onCancel: () => void
   onCreated: (value: BranchCreateValue) => Promise<void> | void
+  onAttached: (value: BranchAttachValue) => Promise<void> | void
   /**
    * 紧凑形态（右侧详情列用）：窄栏里放不下"父会话说明 + 轮次输入框"，
    * 所以只留标题、一句轮次说明、提问框与两个按钮；轮次固定为**被点的那个框**的轮次。
    */
   compact?: boolean
 }): ReactNode {
+  const [mode, setMode] = useState<'branch' | 'file'>('branch')
   const [parentTurn, setParentTurn] = useState(String(defaultTurn))
   const [prompt, setPrompt] = useState('')
+  const [path, setPath] = useState('')
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<string | null>(null)
 
   const submit = async (): Promise<void> => {
     setBusy(true)
     setFailure(null)
+    if (mode === 'file') {
+      const target = path.trim()
+      if (target === '') {
+        setBusy(false)
+        setFailure('请填一个文件的绝对路径（例如 D:\\文件\\笔记.md）')
+        return
+      }
+      const attached = await branchApi.attachFile(parentNodeId, target)
+      setBusy(false)
+      if (!attached.ok) {
+        setFailure(`${attached.error.code}：${attached.error.message}`)
+        return
+      }
+      setPath('')
+      await onAttached(attached.value)
+      return
+    }
     const result = await branchApi.create({
       parentSessionId,
       parentTurn: Number.parseInt(parentTurn, 10),
@@ -943,42 +999,98 @@ function BranchCreateForm({
     await onCreated(result.value)
   }
 
+  const submitLabel =
+    mode === 'file' ? '挂文件' : compact ? '建子会话' : '建子会话'
+
   return (
     <div
       className={compact ? `${cls.form} ${cls.formCompact}` : cls.form}
       {...(compact ? { 'data-dsh-branch-compact-form': '' } : {})}
+      data-dsh-branch-form-mode={mode}
     >
-      <h3 className={cls.sectionTitle}>在「{parentLabel}」上提新问题</h3>
-      {compact ? (
-        <p className={cls.muted}>
-          父轮次：第 {parentTurn} 轮（子会话不继承上下文，只继承模型人设与权限）
-        </p>
-      ) : (
+      <div className={cls.actions} role="tablist" aria-label="在这个节点下加什么">
+        <button
+          type="button"
+          role="tab"
+          className={cls.button}
+          aria-selected={mode === 'branch'}
+          data-dsh-branch-form-tab="branch"
+          onClick={() => {
+            setMode('branch')
+            setFailure(null)
+          }}
+        >
+          建子会话
+        </button>
+        <button
+          type="button"
+          role="tab"
+          className={cls.button}
+          aria-selected={mode === 'file'}
+          data-dsh-branch-form-tab="file"
+          title="只记文件原路径，不复制内容；点文件框会用系统默认程序打开"
+          onClick={() => {
+            setMode('file')
+            setFailure(null)
+          }}
+        >
+          挂文件
+        </button>
+      </div>
+
+      {mode === 'file' ? (
         <>
+          <h3 className={cls.sectionTitle}>在「{parentLabel}」下挂一个文件</h3>
           <p className={cls.muted}>
-            父会话 <code>{parentSessionId}</code>（子会话不继承上下文，只继承模型人设与权限）
+            只记<b>原路径</b>（不复制、不读内容）；点这个文件框会用系统默认程序打开。
+            路径不存在时节点上会标「文件不存在」。
           </p>
           <label className={cls.field}>
-            <span className={cls.label}>父节点轮次（第几次问答，从 1 开始）</span>
+            <span className={cls.label}>文件绝对路径</span>
             <input
               className={cls.input}
-              value={parentTurn}
-              onChange={(event: ChangeEvent<HTMLInputElement>) => setParentTurn(event.target.value)}
-              inputMode="numeric"
+              value={path}
+              placeholder="D:\\文件\\笔记.md"
+              onChange={(event: ChangeEvent<HTMLInputElement>) => setPath(event.target.value)}
+            />
+          </label>
+        </>
+      ) : (
+        <>
+          <h3 className={cls.sectionTitle}>在「{parentLabel}」上提新问题</h3>
+          {compact ? (
+            <p className={cls.muted}>
+              父轮次：第 {parentTurn} 轮（子会话不继承上下文，只继承模型人设与权限）
+            </p>
+          ) : (
+            <>
+              <p className={cls.muted}>
+                父会话 <code>{parentSessionId}</code>（子会话不继承上下文，只继承模型人设与权限）
+              </p>
+              <label className={cls.field}>
+                <span className={cls.label}>父节点轮次（第几次问答，从 1 开始）</span>
+                <input
+                  className={cls.input}
+                  value={parentTurn}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) => setParentTurn(event.target.value)}
+                  inputMode="numeric"
+                />
+              </label>
+            </>
+          )}
+          <label className={cls.field}>
+            <span className={cls.label}>首句提问（可留空，稍后在子会话里输入）</span>
+            <textarea
+              className={cls.textarea}
+              value={prompt}
+              onChange={(event: ChangeEvent<HTMLTextAreaElement>) => setPrompt(event.target.value)}
+              rows={compact ? 2 : 3}
+              placeholder="在这个节点上想问的新问题……"
             />
           </label>
         </>
       )}
-      <label className={cls.field}>
-        <span className={cls.label}>首句提问（可留空，稍后在子会话里输入）</span>
-        <textarea
-          className={cls.textarea}
-          value={prompt}
-          onChange={(event: ChangeEvent<HTMLTextAreaElement>) => setPrompt(event.target.value)}
-          rows={compact ? 2 : 3}
-          placeholder="在这个节点上想问的新问题……"
-        />
-      </label>
+
       <div className={cls.actions}>
         <button
           type="button"
@@ -988,7 +1100,7 @@ function BranchCreateForm({
             void submit()
           }}
         >
-          {busy ? '正在建子会话…' : '建子会话'}
+          {busy ? (mode === 'file' ? '正在挂文件…' : '正在建子会话…') : submitLabel}
         </button>
         <button type="button" className={cls.button} disabled={busy} onClick={onCancel}>
           取消

@@ -44,6 +44,13 @@ export interface BranchTreeView {
   readonly currentNodeId: string | null
 }
 
+/** 挂文件节点的结果（与 host 的 attachFileNode 对应）。 */
+export interface BranchAttachValue {
+  readonly treeId: string
+  readonly nodeId: string
+  readonly path: string
+}
+
 /** 统一 envelope 调用；永不抛出（返回失败 envelope）。 */
 async function post<T>(path: string, payload: Record<string, unknown>): Promise<BranchApiResult<T>> {
   try {
@@ -109,9 +116,7 @@ export const branchApi = {
    * @param parentNodeId - 挂载点节点 id。
    * @param path - 文件绝对路径。
    */
-  attachFile(parentNodeId: string, path: string): Promise<
-    BranchApiResult<{ treeId: string; nodeId: string; path: string }>
-  > {
+  attachFile(parentNodeId: string, path: string): Promise<BranchApiResult<BranchAttachValue>> {
     return post('branch/attach-file', { parentNodeId, path })
   },
   /**

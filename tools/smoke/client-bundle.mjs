@@ -372,6 +372,60 @@ track('页面初始态（还没读到树）不画空画布，只给一句可读�
   assert.equal(empty.length, 1, '应当给一句"还没有树"的可读提示')
 })
 
+track('节点上的「＋」表单：有「建子会话 / 挂文件」两个页签，默认是建子会话', () => {
+  assert.equal(typeof exports.BranchCreateForm, 'function', '产物没有导出 BranchCreateForm（节点上的表单）')
+  assert.ok(
+    source.includes('branch/attach-file'),
+    '产物里没有 attach-file 调用：文件节点入口接线丢了',
+  )
+  const element = exports.BranchCreateForm({
+    parentLabel: '第 2 轮',
+    parentSessionId: 'session-x',
+    parentNodeId: 'n-2',
+    defaultTurn: 2,
+    onCancel: () => {},
+    onCreated: () => {},
+    onAttached: () => {},
+  })
+  /**
+   * 在假 React 下递归收集元素（`useState` 返回初始值，所以这棵树就是"首帧"）。
+   * @param node - jsx 元素或任意值。
+   * @param found - 收集结果。
+   * @returns 命中的元素数组。
+   */
+  const flatten = (node, found = []) => {
+    if (node === null || node === undefined || typeof node !== 'object') return found
+    if (Array.isArray(node)) {
+      for (const item of node) flatten(item, found)
+      return found
+    }
+    if ('type' in node && 'props' in node) {
+      found.push(node)
+      flatten(node.props?.children, found)
+    }
+    return found
+  }
+  const elements = flatten(element)
+  const tabs = elements.filter((item) => item.props?.['data-dsh-branch-form-tab'] !== undefined)
+  assert.equal(tabs.length, 2, '应有「建子会话」与「挂文件」两个页签')
+  assert.deepEqual(
+    tabs.map((item) => item.props['data-dsh-branch-form-tab']),
+    ['branch', 'file'],
+    '页签顺序变了（建子会话在前、挂文件在后）',
+  )
+  assert.equal(element.props['data-dsh-branch-form-mode'], 'branch', '默认模式应是建子会话')
+  assert.equal(
+    elements.filter((item) => item.type === 'textarea').length,
+    1,
+    '默认视图应有"首句提问"框',
+  )
+  assert.equal(
+    elements.filter((item) => item.type === 'input').length,
+    1,
+    '默认视图只应有"父节点轮次"一个输入框',
+  )
+})
+
 track('样式随产物发布：__DSH_BRANCH_CSS__ 有内容，且关键画布规则都在里面', () => {
   // 构建时把样式挂在 **window** 上（浏览器里它就是全局对象）；测试里的假 window 也是同一个。
   const css = globalThis.window?.__DSH_BRANCH_CSS__
