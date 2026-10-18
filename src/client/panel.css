@@ -187,6 +187,8 @@
 
 .dsh-branch-actions {
   display: flex;
+  /* 三个页签（原生分支 / 建子会话 / 挂文件）在右侧窄栏里必须能换行，不能横向溢出。 */
+  flex-wrap: wrap;
   gap: 8px;
 }
 

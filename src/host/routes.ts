@@ -19,6 +19,8 @@ export interface RouteDeps {
     readonly agents: boolean
     readonly sessionController: boolean
     readonly agentPresets: boolean
+    /** 官方原生分支（`sessionController.fork`）是否可用。 */
+    readonly nativeFork: boolean
     /** 工作区注册表是否在场（建子会话后把新会话挂进父会话的工作区）。 */
     readonly workspaces: boolean
     readonly storage: { readonly root: string; readonly exists: boolean; readonly writable: boolean }
@@ -54,6 +56,18 @@ export async function handleBranchRoute(deps: RouteDeps, request: Request): Prom
             parentTurn,
             ...(prompt !== undefined ? { prompt } : {}),
           },
+          signal,
+        )
+        return json({ ok: true, value })
+      }
+
+      case 'POST fork': {
+        // DSH 原生分支：继承截止该轮 `turn/end` 的上下文，并进入父会话的工作区。
+        const body = await readJson(request)
+        const parentNodeId = stringField(body, 'parentNodeId')
+        const prompt = optionalStringField(body, 'prompt')
+        const value = await deps.service.forkBranch(
+          { parentNodeId, ...(prompt !== undefined ? { prompt } : {}) },
           signal,
         )
         return json({ ok: true, value })

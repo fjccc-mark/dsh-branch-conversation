@@ -26,11 +26,21 @@ export { BranchService, BranchFailure, isIndexDocument } from './host/branch-ser
 export {
   createChildSession,
   deliverFirstPrompt,
+  forkChildSession,
   inspectSession,
   readSessionSnapshot,
   sessionModelOf,
+  workspaceOfSession,
 } from './host/session-model.ts'
-export type { CreateChildSessionInput, CreatedChildSession, SessionModel, SessionSnapshot } from './host/session-model.ts'
+export type {
+  CreateChildSessionInput,
+  CreatedChildSession,
+  ForkChildSessionInput,
+  ForkedChildSession,
+  SessionModel,
+  SessionSnapshot,
+  WorkspaceAttachOutcome,
+} from './host/session-model.ts'
 
 /** 插件名（出现在 loader 名册与诊断输出里）。 */
 export const name = 'branch-conversation'
@@ -113,6 +123,7 @@ export function apply(ctx: Context, config?: Partial<Config>): void {
         agents: summary.agents,
         sessionController: summary.sessionController,
         agentPresets: summary.agentPresets,
+        nativeFork: summary.nativeFork,
         workspaces: summary.workspaces,
         storage: { root: summary.storageRoot, exists: summary.root.exists, writable: summary.root.writable },
         panelId: BRANCH_PANEL_ID,

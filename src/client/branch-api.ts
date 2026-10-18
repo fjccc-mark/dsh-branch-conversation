@@ -19,6 +19,12 @@ export interface BranchCreateValue {
   readonly workspaceAttached?: boolean
   readonly workspaceId?: string
   readonly workspaceError?: string
+  /** 这条分支是不是 DSH 原生分支（官方 fork，继承上下文）。 */
+  readonly nativeBranch?: boolean
+  /** 是否继承了父会话的上下文。 */
+  readonly contextInherited?: boolean
+  /** 原生分支的 fork 切点（父轮 `turn/end` 的 seq）。 */
+  readonly forkAtSeq?: number
 }
 
 /** 树上节点（页面渲染用的最小子集）。 */
@@ -34,6 +40,8 @@ export interface BranchNodeView {
   readonly orphan: boolean
   readonly children: readonly string[]
   readonly file: { readonly path: string; readonly missing: boolean } | null
+  /** 是否是 DSH 原生分支（继承上文）。 */
+  readonly native?: boolean
 }
 
 /** 树视图。 */
@@ -84,6 +92,13 @@ export const branchApi = {
     BranchApiResult<BranchCreateValue>
   > {
     return post('branch/create', input)
+  },
+  /**
+   * 在某个节点上开一条 **DSH 原生分支**（官方 fork）：继承截止该轮的上下文，并进入父会话的工作区。
+   * @param input - 被点的节点与可选首句提问。
+   */
+  fork(input: { parentNodeId: string; prompt?: string }): Promise<BranchApiResult<BranchCreateValue>> {
+    return post('branch/fork', input)
   },
   /** 把一个已有会话的轮次补成节点（把老对话接进树）。 */
   adopt(sessionId: string): Promise<BranchApiResult<BranchTreeView>> {

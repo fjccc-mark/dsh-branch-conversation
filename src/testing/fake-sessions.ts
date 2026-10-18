@@ -106,6 +106,8 @@ export interface FakeSessions {
     list: (request: unknown, signal: AbortSignal) => Promise<unknown>
     inspect: (sessionId: string, signal?: AbortSignal) => Promise<unknown>
     prompt: (request: unknown, signal: AbortSignal) => Promise<unknown>
+    /** 官方原生分支（`sessionController.fork`）：按事件 seq 复制前缀，并挂进源会话的工作区。 */
+    fork: (request: unknown, signal?: AbortSignal) => Promise<unknown>
   }
   /** 人设注册表（可选传给 BranchService 的 ctx）。 */
   readonly presets: FakePresets
@@ -187,6 +189,7 @@ export function createFakeSessions(): FakeSessions {
     sessionId: string,
     meta: Record<string, unknown>,
     persisted: boolean,
+    seedLength = 0,
   ): FakeSession => {
     const session: FakeSession = {
       id: sessionId,
@@ -199,8 +202,8 @@ export function createFakeSessions(): FakeSessions {
         ...(typeof meta.delegationDepth === 'number'
           ? { delegationDepth: meta.delegationDepth }
           : {}),
-        // 官方语义：不给 seed（或 seed 为空）时 seedLength 为 0。
-        seedLength: 0,
+        // 官方语义：不给 seed（或 seed 为空）时 seedLength 为 0；fork 时 = 切点 seq + 1。
+        seedLength,
         ...(meta.origin === 'subagent' ? { origin: 'subagent' as const } : {}),
       },
       events: [],
@@ -284,7 +287,12 @@ export function createFakeSessions(): FakeSessions {
       inspect: async (sessionId: string) => {
         // 与真机一致：inspect 能读**活会话**（还没落盘的也在），所以它以内存为准。
         const session = require(sessionId)
-        return { meta: { ...session.meta }, events: session.events.map((event) => ({ ...event })) }
+        return {
+          meta: { ...session.meta },
+          events: session.events.map((event) => ({ ...event })),
+          // 官方契约：返回事件正文的读取携带精确的继承事件条数（无 seed 为 0）。
+          inheritedEventCount: session.meta.seedLength,
+        }
       },
       prompt: async (request: unknown) => {
         const payload = request as { sessionId?: string; mode?: string; content?: readonly { text?: string }[] }
@@ -296,6 +304,67 @@ export function createFakeSessions(): FakeSessions {
         // 投递进队列 = 会话有了第一条事件 → 真实 DSH 会开始落盘。
         session.persisted = true
         return { accepted: true }
+      },
+      fork: async (request: unknown) => {
+        const payload = request as { sessionId?: unknown; atSeq?: unknown }
+        const source = require(typeof payload.sessionId === 'string' ? payload.sessionId : '')
+        const events = source.events as { type: string; seq: number; data: unknown }[]
+        let boundary: number
+        if (payload.atSeq === undefined) {
+          const lastEnd = events.filter((event) => event.type === 'turn/end').at(-1)
+          if (lastEnd === undefined) {
+            throw new Error(`session "${source.id}" has no completed turn to fork from`)
+          }
+          boundary = lastEnd.seq
+        } else {
+          if (
+            typeof payload.atSeq !== 'number' ||
+            !Number.isInteger(payload.atSeq) ||
+            payload.atSeq < 0
+          ) {
+            throw new Error('atSeq must be a non-negative safe integer')
+          }
+          if (!events.some((event) => event.seq === payload.atSeq)) {
+            throw new Error(
+              `event ${String(payload.atSeq)} does not exist in session "${source.id}"`,
+            )
+          }
+          boundary = payload.atSeq
+        }
+        // 官方 fork：复制截止切点（含）的事件前缀；子会话 isSeeded=true、parentSession=源会话。
+        const seed = events
+          .filter((event) => event.seq <= boundary)
+          .map((event) => ({ ...event }))
+        const childId = nextId()
+        const child = createSession(
+          childId,
+          {
+            ...(source.meta.cwd !== undefined ? { cwd: source.meta.cwd } : {}),
+            parentSession: source.id,
+            isSeeded: true,
+            ...(source.meta.agentPreset !== undefined
+              ? { agentPreset: source.meta.agentPreset }
+              : {}),
+            delegationDepth: 0,
+          },
+          true,
+          boundary + 1,
+        )
+        // 官方 `Session` 构造会在 seed 末尾补 `session/end-seed`（自有事件从 seq=inheritedEventCount 起）。
+        ;(child.events as { type: string; seq: number; data: unknown }[]).push(
+          ...seed,
+          { type: 'session/end-seed', seq: boundary + 1, data: {} },
+        )
+        // 官方 `forkWorkspace()`：把子会话挂进源会话所在工作区（挂不上会抛）。
+        const owner = [...projects.values()].find((project) => project.ids.includes(source.id))
+        if (owner !== undefined) {
+          if (source.meta.cwd !== owner.path) {
+            rejectedAttach.push(`cwd mismatch ${childId}: ${source.meta.cwd ?? '(none)'} != ${owner.path}`)
+            throw new Error(`workspace attach: cwd mismatch for ${childId}`)
+          }
+          if (!owner.ids.includes(childId)) owner.ids.unshift(childId)
+        }
+        return { sessionId: childId }
       },
     },
     presets: {

@@ -274,6 +274,197 @@ track('子智能体会话不参与：origin=subagent 的会话不建树', async 
 })
 
 // ---------------------------------------------------------------------------
+// 4.5 DSH 原生分支（官方 fork）：继承上下文 + 父会话工作区
+// ---------------------------------------------------------------------------
+
+const hn = await harness()
+hn.fake.seedSession({ id: 's-native', turns: 2, cwd: 'D:\\native', agentPreset: 'standard' })
+hn.fake.workspaces.seedWorkspace({
+  id: 'ws-native',
+  path: 'D:\\native',
+  sessionIds: ['s-native'],
+})
+let nativeParentView = null
+let nativeTurn1 = null
+let nativeTurn2 = null
+let nativeTurn3 = null
+let nativeBranch = null
+
+track('准备：原生分支的父会话有 3 轮，树上有第 1~3 轮节点', async () => {
+  nativeParentView = await hn.service.adoptSession('s-native', never)
+  hn.fake.addTurn('s-native')
+  nativeParentView = await hn.service.adoptSession('s-native', never)
+  nativeTurn1 = nativeParentView.document.nodes.find(
+    (node) => node.sessionId === 's-native' && node.turn === 1,
+  )
+  nativeTurn2 = nativeParentView.document.nodes.find(
+    (node) => node.sessionId === 's-native' && node.turn === 2,
+  )
+  nativeTurn3 = nativeParentView.document.nodes.find(
+    (node) => node.sessionId === 's-native' && node.turn === 3,
+  )
+  assert.ok(nativeTurn1 && nativeTurn2 && nativeTurn3, '三只父轮次节点都应存在')
+})
+
+track('forkBranch：原生分支继承上下文（isSeeded / 前缀事件 / 同 cwd + preset）', async () => {
+  nativeBranch = await hn.service.forkBranch(
+    { parentNodeId: nativeTurn2.id, prompt: '带着上文继续问' },
+    never,
+  )
+  assert.equal(nativeBranch.nativeBranch, true, '回包应标明这是原生分支')
+  assert.equal(nativeBranch.contextInherited, true, '回包应标明继承了上下文')
+  assert.equal(nativeBranch.forkAtSeq, nativeTurn2.anchorSeq, 'fork 切点应是第 2 轮 turn/end 的 seq')
+  assert.equal(nativeBranch.promptDelivered, true, '首句提问应投递进新会话')
+
+  const child = hn.fake.get(nativeBranch.sessionId)
+  assert.ok(child !== undefined, '没有创建出原生分支会话')
+  assert.equal(child.meta.isSeeded, true, '原生分支必须是 seeded 会话')
+  assert.equal(child.meta.parentSession, 's-native', '血缘应指向父会话')
+  assert.equal(child.meta.cwd, 'D:\\native', 'cwd 应继承父会话')
+  assert.equal(child.meta.agentPreset, 'standard', '人设应继承父会话')
+  assert.equal(
+    child.meta.seedLength,
+    nativeTurn2.anchorSeq + 1,
+    'seedLength 应是"截止切点（含）"的事件条数',
+  )
+  // 上游 3 轮里只应复制到第 2 轮（含）：第 3 轮是 fork 之后才有的，不属于这份上下文。
+  const inheritedTurnStarts = child.events
+    .filter((event) => event.seq <= nativeTurn2.anchorSeq && event.type === 'turn/start')
+    .length
+  assert.equal(inheritedTurnStarts, 2, '继承前缀里应只有第 1、2 轮，不能把第 3 轮也带进来')
+  assert.equal(child.prompts.length, 1)
+  assert.equal(child.prompts[0].mode, 'queue', '首句提问应先排队，不抢正在跑的轮次')
+  assert.equal(child.prompts[0].text, '带着上文继续问')
+})
+
+track('forkBranch：原生分支由官方 fork 挂进父会话的工作区', async () => {
+  assert.equal(
+    nativeBranch.workspaceAttached,
+    true,
+    `回包说没挂进工作区：${nativeBranch.workspaceError ?? '(没有原因)'}`,
+  )
+  assert.equal(nativeBranch.workspaceId, 'ws-native', '挂进了错误的工作区')
+  const owner = hn.fake.workspaces.workspaceOf(nativeBranch.sessionId)
+  assert.equal(owner?.id, 'ws-native', '原生分支不在父会话的工作区账本里')
+})
+
+track('forkBranch：挂到被点的那一轮（不是最新一轮），仍在父会话同一棵树里', async () => {
+  const view = await hn.service.viewOfSession('s-native')
+  const turn2 = view.document.nodes.find((node) => node.id === nativeTurn2.id)
+  const turn3 = view.document.nodes.find((node) => node.id === nativeTurn3.id)
+  assert.ok(turn2.children.includes(nativeBranch.nodeId), '第 2 轮下应出现这条原生分支')
+  assert.deepEqual(turn3.children, [], '不能因为第 3 轮更新就挂到第 3 轮下面')
+  assert.equal(view.document.root.sessionId, 's-native', '树的根仍是父会话')
+  const childNode = view.document.nodes.find((node) => node.id === nativeBranch.nodeId)
+  assert.equal(childNode.label, '带着上文继续问', '节点标题应取首句提问')
+  assert.equal(childNode.turn, null, '还没跑自有轮次时是占位节点')
+  const treeIds = (await hn.store.listTreeIds()).filter((id) => id !== '_index')
+  assert.equal(treeIds.length, 1, `原生分支不该另起一棵树：${treeIds.join(', ')}`)
+})
+
+track('adoptSession：打开原生分支时，不把父对话历史复制成它自己的节点', async () => {
+  const view = await hn.service.adoptSession(nativeBranch.sessionId, never)
+  assert.equal(view.document.root.sessionId, 's-native', '原生分支仍属于父会话那棵树')
+  const childNodes = view.document.nodes.filter(
+    (node) => node.sessionId === nativeBranch.sessionId,
+  )
+  assert.equal(childNodes.length, 1, `应只有 1 个占位节点，实际 ${childNodes.length} 个`)
+  assert.equal(childNodes[0].turn, null, '还没跑自有轮次，节点仍是占位')
+  assert.equal(view.currentNodeId, nativeBranch.nodeId, '当前节点应能定位到这条分支')
+})
+
+track('adoptSession：原生分支跑完第一轮后认领占位节点，且只多出一个轮次节点', async () => {
+  hn.fake.addTurn(nativeBranch.sessionId)
+  const view = await hn.service.adoptSession(nativeBranch.sessionId, never)
+  const childNodes = view.document.nodes.filter(
+    (node) => node.sessionId === nativeBranch.sessionId,
+  )
+  assert.equal(childNodes.length, 1, '占位节点应被认领，不能把父对话轮次再铺一遍')
+  // 继承前缀里有几轮，自有轮次就从它的下一号继续（官方 seeded 会话的编号语义）。
+  const child = hn.fake.get(nativeBranch.sessionId)
+  const inheritedTurns = child.events.filter(
+    (event) => event.seq <= nativeBranch.forkAtSeq && event.type === 'turn/start',
+  ).length
+  assert.equal(
+    childNodes[0].turn,
+    inheritedTurns + 1,
+    `自有轮次号应接在继承轮次之后，实际 ${childNodes[0].turn}`,
+  )
+  assert.equal(childNodes[0].label, '带着上文继续问', '首句提问当标题的节点不该被改成通用名')
+})
+
+track('adoptSession：官方 UI 建的原生分支（插件没参与）打开后挂回父树', async () => {
+  // 模拟用户在官方聊天里点「在新对话中分支」：直接走官方 fork，插件完全不知情。
+  const external = await hn.fake.controller.fork({
+    sessionId: 's-native',
+    atSeq: nativeTurn3.anchorSeq,
+  })
+  const view = await hn.service.adoptSession(external.sessionId, never)
+  assert.equal(view.document.root.sessionId, 's-native', '打开后不能变成一棵以它自己为根的新树')
+  const turn3 = view.document.nodes.find((node) => node.id === nativeTurn3.id)
+  const childNode = view.document.nodes.find(
+    (node) => node.sessionId === external.sessionId,
+  )
+  assert.ok(childNode !== undefined, '原生分支应被挂进父树')
+  assert.ok(turn3.children.includes(childNode.id), '应挂在被 fork 的第 3 轮下面')
+  const treeIds = (await hn.store.listTreeIds()).filter((id) => id !== '_index')
+  assert.equal(treeIds.length, 1, `不该多出一棵以子会话为根的树：${treeIds.join(', ')}`)
+})
+
+track('adoptSession：打开父会话时能发现尚未打开过的原生分支', async () => {
+  const external = await hn.fake.controller.fork({
+    sessionId: 's-native',
+    atSeq: nativeTurn1.anchorSeq,
+  })
+  const view = await hn.service.adoptSession('s-native', never)
+  const turn1 = view.document.nodes.find((node) => node.id === nativeTurn1.id)
+  const childNode = view.document.nodes.find((node) => node.sessionId === external.sessionId)
+  assert.ok(childNode !== undefined, '父会话 adopt 时应发现这条尚未打开过的原生分支')
+  assert.ok(turn1.children.includes(childNode.id), '应挂在第 1 轮下面')
+})
+
+track('forkBranch：缺少官方 fork 能力 → unsupported（不静默退回不继承上文的通道）', async () => {
+  const withoutFork = {
+    list: async () => ({ items: [] }),
+    inspect: async () => null,
+  }
+  const bare = new BranchService({
+    store: hn.store,
+    ctx: { sessionController: withoutFork },
+    log: () => {},
+  })
+  const error = await bare
+    .forkBranch({ parentNodeId: nativeTurn1.id }, never)
+    .then(() => null, (cause) => cause)
+  assert.equal(knownCode(error), 'unsupported')
+})
+
+track('forkBranch：节点不存在 / 文件节点 / 未完成轮次 → 可读错误', async () => {
+  const missing = await hn.service
+    .forkBranch({ parentNodeId: 'nope' }, never)
+    .then(() => null, (cause) => cause)
+  assert.equal(knownCode(missing), 'not-found')
+
+  const fileNode = await hn.service.attachFileNode({
+    parentNodeId: nativeTurn1.id,
+    path: join(hn.root, 'not-a-real-file.txt'),
+  })
+  const onFile = await hn.service
+    .forkBranch({ parentNodeId: fileNode.nodeId }, never)
+    .then(() => null, (cause) => cause)
+  assert.equal(knownCode(onFile), 'invalid-request', '文件节点上不该能开分支')
+
+  const placeholder = await hn.service.createBranch(
+    { parentSessionId: 's-native', parentTurn: 1, prompt: '不继承上文的子会话' },
+    never,
+  )
+  const onPlaceholder = await hn.service
+    .forkBranch({ parentNodeId: placeholder.nodeId }, never)
+    .then(() => null, (cause) => cause)
+  assert.equal(knownCode(onPlaceholder), 'invalid-request', '没有 turn/end 锚点时不能 fork')
+})
+
+// ---------------------------------------------------------------------------
 // 5. 路由层：真 apply() + 假上下文，走 HTTP 语义
 // ---------------------------------------------------------------------------
 
@@ -309,6 +500,30 @@ track('路由：/branch/create 走通，缺字段 400，未知路由 404，缺�
   const okBody = await okResponse.json()
   assert.equal(okBody.ok, true, `信封异常：${JSON.stringify(okBody)}`)
   assert.equal(okBody.value.promptDelivered, true)
+
+  // 原生分支路由：先 adopt 拿到节点 id，再 POST /branch/fork。
+  const adopted = await handler(
+    new Request('http://127.0.0.1:19387/branch/adopt', {
+      method: 'POST',
+      body: JSON.stringify({ sessionId: 's-route' }),
+    }),
+  )
+  const adoptedBody = await adopted.json()
+  const routeNodeId = adoptedBody.value.document.nodes.find(
+    (node) => node.sessionId === 's-route' && node.kind === 'qa',
+  )?.id
+  assert.ok(typeof routeNodeId === 'string', 'adopt 后应能找到父轮次节点')
+  const forkResponse = await handler(
+    new Request('http://127.0.0.1:19387/branch/fork', {
+      method: 'POST',
+      body: JSON.stringify({ parentNodeId: routeNodeId, prompt: '路由建的原生分支' }),
+    }),
+  )
+  assert.equal(forkResponse.status, 200)
+  const forkBody = await forkResponse.json()
+  assert.equal(forkBody.ok, true, `原生分支信封异常：${JSON.stringify(forkBody)}`)
+  assert.equal(forkBody.value.nativeBranch, true)
+  assert.equal(forkBody.value.contextInherited, true)
 
   const missing = await handler(
     new Request('http://127.0.0.1:19387/branch/create', {
@@ -416,7 +631,7 @@ for (const item of cases) {
 }
 console.log(`\n${cases.length - failed}/${cases.length} 通过`)
 
-for (const holder of [h1, h2, h3, h9]) {
+for (const holder of [h1, h2, h3, hn, h9]) {
   await rm(holder.root, { recursive: true, force: true })
 }
 process.exitCode = failed === 0 ? 0 : 1

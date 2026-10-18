@@ -75,6 +75,8 @@ export interface TreeBox {
   readonly filePath: string | null
   /** 文件是否已消失。 */
   readonly fileMissing: boolean
+  /** 是否是 DSH 原生分支（继承上文；用于框内标记）。 */
+  readonly native: boolean
   /** 是否当前主视图会话所在的节点（框高亮）。 */
   readonly current: boolean
   /** 左边缘 x（画布坐标）。 */
@@ -159,6 +161,7 @@ interface PlacedNode {
   readonly orphan: boolean
   readonly filePath: string | null
   readonly fileMissing: boolean
+  readonly native: boolean
   readonly current: boolean
   /** 局部坐标（原点 = 所在子树的根框左上角，最后统一平移到画布坐标）。 */
   x: number
@@ -304,6 +307,7 @@ export function layoutTree(view: BranchTreeView | null): TreeLayout {
       orphan: node.orphan,
       filePath: node.file?.path ?? null,
       fileMissing: node.file?.missing ?? false,
+      native: node.native === true,
       current: node.id === view.currentNodeId,
       x: 0,
       y: 0,
@@ -465,6 +469,7 @@ export function layoutTree(view: BranchTreeView | null): TreeLayout {
         orphan: item.orphan,
         filePath: item.filePath,
         fileMissing: item.fileMissing,
+        native: item.native,
         current: item.current,
         x: PADDING + (item.x - minX),
         y: cursorY + (item.y - minY),

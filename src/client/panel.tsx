@@ -7,7 +7,7 @@
  *
  * 交互：
  *   - 点击节点框 → 切换到该会话（官方 `uiWorkspace.openSession`，由入口注入）；
- *   - 框上的「＋」→ 在该节点上提新问题（建子会话）；
+ *   - 框上的「＋」→ 在该节点上开**原生分支**（继承上文 + 工作区）/ 建**子会话**（不继承上文）/ 挂文件；
  *   - 文件节点 → 用系统默认程序打开（裁决 §3.4 路线 ①）；
  *   - 「▾/▸」→ 折叠/展开子树（状态持久化在树文档里）；
  *   - 画布双向滚动；工具条与 `Ctrl+滚轮` 缩放（纯视图状态，不写树）。
@@ -418,8 +418,9 @@ export function BranchPanelPage({
       <header className={cls.header}>
         <h2 className={cls.title}>分支对话</h2>
         <p className={cls.subtitle}>
-          主对话的每一次问答是一个节点框；在节点上提出新问题即开出一条子对话（不继承上下文，只继承模型人设与权限）。
-          画布可拖动滚动、可缩放（Ctrl + 滚轮）。
+          主对话的每一次问答是一个节点框。点节点上的「＋」可以开一条<b>原生分支</b>
+          （继承这一轮及之前的上下文，并进入父对话的工作区），也可以建一条<b>全新子对话</b>
+          （不继承上下文，只继承模型人设与权限）。画布可拖动滚动、可缩放（Ctrl + 滚轮）。
         </p>
       </header>
 
@@ -592,6 +593,12 @@ export function BranchPanelPage({
               <span className={cls.hint}>（列表、分页、导航）</span>
             </li>
             <li>
+              原生分支 <code>sessionController.fork</code>：{flag(report.nativeFork === true)}
+              <span className={cls.hint}>
+                （官方「在新对话中分支」同一条通道：继承这一轮及之前的上下文，并进入父对话的工作区）
+              </span>
+            </li>
+            <li>
               人设 preset <code>agentPresets</code>：{flag(report.agentPresets)}
               <span className={cls.hint}>（模型/人设/权限继承）</span>
             </li>
@@ -701,7 +708,7 @@ function BranchCanvas({
  *
  * 右侧栏比中央列窄得多（默认约 320~420px），所以：
  *   - 画布高度改成**撑满容器**（而不是页面那种 `62vh`），窄栏里纵向空间更值钱；
- *   - 点「＋」建分支/挂文件时用**紧凑表单**（`BranchCreateForm compact`）：只有"建子会话 / 挂文件"两个页签、
+ *   - 点「＋」建分支/挂文件时用**紧凑表单**（`BranchCreateForm compact`）：三个页签（原生分支 / 建子会话 / 挂文件）、
  *     一句说明、输入框与两个按钮——挂载点固定为被点的那个框，所以不摆轮次输入框（窄栏也放得下）。
  *
  * @param props.sessionId - 该页签所属会话（框架按 session 作用域给出）。
@@ -867,6 +874,7 @@ function NodeBox({
       className={modifier === null ? cls.node : `${cls.node} ${modifier}`}
       data-dsh-branch-node={box.id}
       data-dsh-branch-kind={box.kind}
+      data-dsh-branch-native={box.native ? 'true' : undefined}
       data-dsh-branch-depth={String(box.depth)}
       data-dsh-branch-x={String(box.x)}
       data-dsh-branch-y={String(box.y)}
@@ -886,13 +894,19 @@ function NodeBox({
         <span className={cls.nodeDot} aria-hidden="true" />
         {box.turn !== null ? <span className={cls.nodeTurn}>第 {box.turn} 轮</span> : null}
         <span className={cls.nodeMeta}>
-          {box.orphan ? '原会话已删除' : box.fileMissing ? '文件不存在' : ''}
+          {box.orphan
+            ? '原会话已删除'
+            : box.fileMissing
+              ? '文件不存在'
+              : box.native
+                ? '继承上文'
+                : ''}
         </span>
         {box.kind === 'qa' && !box.orphan && box.turn !== null ? (
           <button
             type="button"
             className={cls.nodePlus}
-            title="在这个节点下：提新问题建子会话 / 挂一个文件节点"
+            title="在这个节点下：建原生分支（继承上文）/ 建子会话 / 挂一个文件节点"
             onClick={() => onBranch(box)}
           >
             ＋
@@ -923,12 +937,13 @@ function NodeBox({
 
 /** 建分支的表单（由节点上的「＋」唤起）。 */
 /**
- * 节点上的表单（由「＋」唤起）：两种在这个节点下加东西的方式。
+ * 节点上的表单（由「＋」唤起）：三种在这个节点下加东西的方式。
  *
- *   - **建子会话**（裁决 A2/B3）：提问 → 新会话，不继承上下文，只继承人设/权限；
- *   - **挂文件**（裁决 A3）：只记原路径，不复制、不读内容；点文件框用系统默认程序打开。
+ *   - **原生分支**（DSH 官方 fork）：继承这一轮及之前的**全部上下文**，并进入父对话的工作区；
+ *   - **建子会话**（裁决 A2/B3）：提问 → 新会话，**不继承上下文**，只继承人设/权限；
+ *   - **挂文件**（裁决 A3）：只记原路径，不复制、不读内容；点文件框会用系统默认程序打开。
  *
- * 两者都挂在**被点的那个节点**下，所以共用一张表单：`parentNodeId` 决定挂载点，
+ * 三者都挂在**被点的那个节点**下，所以共用一张表单：`parentNodeId` 决定挂载点，
  * 切页签只换"提交时调哪个接口"。
  */
 export function BranchCreateForm({
@@ -954,7 +969,7 @@ export function BranchCreateForm({
    */
   compact?: boolean
 }): ReactNode {
-  const [mode, setMode] = useState<'branch' | 'file'>('branch')
+  const [mode, setMode] = useState<'native' | 'branch' | 'file'>('native')
   const [parentTurn, setParentTurn] = useState(String(defaultTurn))
   const [prompt, setPrompt] = useState('')
   const [path, setPath] = useState('')
@@ -981,6 +996,20 @@ export function BranchCreateForm({
       await onAttached(attached.value)
       return
     }
+    if (mode === 'native') {
+      const result = await branchApi.fork({
+        parentNodeId,
+        ...(prompt.trim() === '' ? {} : { prompt: prompt.trim() }),
+      })
+      setBusy(false)
+      if (!result.ok) {
+        setFailure(`${result.error.code}：${result.error.message}`)
+        return
+      }
+      setPrompt('')
+      await onCreated(result.value)
+      return
+    }
     const result = await branchApi.create({
       parentSessionId,
       parentTurn: Number.parseInt(parentTurn, 10),
@@ -996,7 +1025,7 @@ export function BranchCreateForm({
   }
 
   const submitLabel =
-    mode === 'file' ? '挂文件' : compact ? '建子会话' : '建子会话'
+    mode === 'file' ? '挂文件' : mode === 'native' ? '建原生分支' : compact ? '建子会话' : '建子会话'
 
   return (
     <div
@@ -1009,8 +1038,23 @@ export function BranchCreateForm({
           type="button"
           role="tab"
           className={cls.button}
+          aria-selected={mode === 'native'}
+          data-dsh-branch-form-tab="native"
+          title="继承这一轮及之前的全部上下文，并进入父对话的工作区（DSH 官方 fork）"
+          onClick={() => {
+            setMode('native')
+            setFailure(null)
+          }}
+        >
+          原生分支
+        </button>
+        <button
+          type="button"
+          role="tab"
+          className={cls.button}
           aria-selected={mode === 'branch'}
           data-dsh-branch-form-tab="branch"
+          title="新建一条不继承上下文的子会话，只继承模型人设与权限"
           onClick={() => {
             setMode('branch')
             setFailure(null)
@@ -1048,6 +1092,24 @@ export function BranchCreateForm({
               value={path}
               placeholder="D:\\文件\\笔记.md"
               onChange={(event: ChangeEvent<HTMLInputElement>) => setPath(event.target.value)}
+            />
+          </label>
+        </>
+      ) : mode === 'native' ? (
+        <>
+          <h3 className={cls.sectionTitle}>从「{parentLabel}」开一条原生分支</h3>
+          <p className={cls.muted}>
+            会把这一轮（第 {parentTurn} 轮）及之前的<b>全部上下文</b>带进新对话，
+            并进入父对话的<b>工作区</b>。新对话里可以直接接着问，不用重述背景。
+          </p>
+          <label className={cls.field}>
+            <span className={cls.label}>分支后的第一句提问（可留空）</span>
+            <textarea
+              className={cls.textarea}
+              value={prompt}
+              onChange={(event: ChangeEvent<HTMLTextAreaElement>) => setPrompt(event.target.value)}
+              rows={compact ? 2 : 3}
+              placeholder="带着上文继续问……"
             />
           </label>
         </>
@@ -1096,7 +1158,13 @@ export function BranchCreateForm({
             void submit()
           }}
         >
-          {busy ? (mode === 'file' ? '正在挂文件…' : '正在建子会话…') : submitLabel}
+          {busy
+            ? mode === 'file'
+              ? '正在挂文件…'
+              : mode === 'native'
+                ? '正在建原生分支…'
+                : '正在建子会话…'
+            : submitLabel}
         </button>
         <button type="button" className={cls.button} disabled={busy} onClick={onCancel}>
           取消
@@ -1116,9 +1184,14 @@ export function BranchCreateForm({
  * @returns 一行可读状态。
  */
 function createdStatus(value: BranchCreateValue): string {
+  const native = value.nativeBranch === true
+  const noun = native ? '原生分支' : '子会话'
+  const inherited = native ? '，已继承被点那一轮及之前的上下文' : ''
   const base = value.promptDelivered
-    ? `已建子会话 ${value.sessionId}，首句提问已排进它的待办队列。`
-    : `已建子会话 ${value.sessionId}${value.promptError !== undefined ? `（首句未投递：${value.promptError}）` : ''}。`
+    ? `已建${noun} ${value.sessionId}${inherited}，首句提问已排进它的待办队列。`
+    : `已建${noun} ${value.sessionId}${inherited}${
+        value.promptError !== undefined ? `（首句未投递：${value.promptError}）` : ''
+      }。`
   if (value.workspaceAttached === true) return `${base}已在父会话的工作区里。`
   if (value.workspaceAttached === false) {
     return `${base}⚠ 没能加入父会话的工作区（${value.workspaceError ?? '未知原因'}），侧边栏里会落在「未分组」。`

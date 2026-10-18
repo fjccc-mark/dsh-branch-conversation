@@ -97,6 +97,22 @@ export interface SessionModel {
     list: (request: unknown, signal: AbortSignal) => Promise<unknown>
     inspect: (sessionId: string, signal?: AbortSignal) => Promise<unknown>
     prompt?: (request: unknown, signal: AbortSignal) => Promise<unknown>
+    /**
+     * 官方原生分支：把源会话截止 `atSeq`（含该事件）的事件前缀复制成一个新会话。
+     *
+     * 实测契约（官方 `@deepseek-ai/dsh-api-session-controller` 0.2.0-rc.2）：
+     *   - `atSeq` 必须是源会话里**真实存在**的事件 seq；省略时取"最近一个已完成轮次前缀"。
+     *   - 在开放轮次内切也会被官方补齐合成收尾事件（本插件只用已完成轮次，不依赖这点）。
+     *   - 子会话 `meta`：`{ cwd: 源 cwd, parentSession: 源 id, isSeeded: true, agentPreset: 源 preset }`，
+     *     并由官方 `forkWorkspace()` 把子会话 **attachSession 进源会话所在的工作区**。
+     *   - 返回 `{ sessionId }`；创建失败抛 `SessionForkError`（错误码 `session/fork-unavailable` 等）。
+     *
+     * 这条能力与本插件"不继承上下文"的 `agents.create` 通道**不是一回事**，两条路都保留。
+     */
+    fork?: (
+      request: { readonly sessionId: string; readonly atSeq?: number },
+      signal?: AbortSignal,
+    ) => Promise<unknown>
     /** 这个部署能否把工作区路径交给宿主桌面（文件节点的"用系统默认程序打开"）。 */
     canOpenWorkspacePath?: () => boolean
     openWorkspacePath?: (request: { path: string }, signal: AbortSignal) => Promise<unknown>
@@ -194,19 +210,47 @@ export async function inspectSession(
     return null
   }
   if (inspected === null || typeof inspected !== 'object') return null
-  const record = inspected as { meta?: unknown; events?: unknown }
+  const record = inspected as { meta?: unknown; events?: unknown; inheritedEventCount?: unknown }
   const meta = (record.meta ?? {}) as {
     id?: unknown
     cwd?: unknown
     parentSession?: unknown
     agentPreset?: unknown
+    isSeeded?: unknown
+    seedLength?: unknown
   }
   const events = Array.isArray(record.events) ? (record.events as readonly RawEvent[]) : []
+
+  // 官方文档（`dsh-session-query`）：返回事件正文的读取携带**精确** `inheritedEventCount`，
+  // 调用方无需从日志推断切点。老版本/假环境可能只给 `meta.seedLength`，两级都兜。
+  const observedInherited =
+    typeof record.inheritedEventCount === 'number' && record.inheritedEventCount >= 0
+      ? record.inheritedEventCount
+      : 0
+  const declaredSeedLength =
+    typeof meta.seedLength === 'number' && meta.seedLength >= 0 ? meta.seedLength : 0
+  const inheritedEventCount = Math.max(observedInherited, declaredSeedLength)
+  const isSeeded = meta.isSeeded === true || inheritedEventCount > 0
+
+  // fork 切点所在父轮：只在**继承前缀**里找最后一个 turn/end。
+  // 它只用于把新分支挂到正确的父节点；拿不到就由调用方退回"最新一轮"。
+  let forkSourceTurn: number | undefined
+  if (inheritedEventCount > 0) {
+    for (const event of events) {
+      if (typeof event.seq !== 'number' || event.seq >= inheritedEventCount) continue
+      if (event.type !== 'turn/end') continue
+      const turn = turnOf(event.data)
+      if (turn !== null) forkSourceTurn = turn
+    }
+  }
 
   const turns: SessionTurnFact[] = []
   const openTurns = new Map<number, { interrupted: boolean }>()
   for (const event of events) {
     if (typeof event.type !== 'string' || typeof event.seq !== 'number') continue
+    // 关键：**继承来的轮次不是子会话自己的轮次**。不排除的话，原生分支一被打开，
+    // 树上就会把父对话的整段历史复制一遍（还会把 fork 切点之后的新轮次排到它们后面）。
+    if (event.seq < inheritedEventCount) continue
     if (event.type === 'turn/start') {
       const turn = turnOf(event.data)
       if (turn !== null) openTurns.set(turn, { interrupted: false })
@@ -230,6 +274,9 @@ export async function inspectSession(
     cwd: typeof meta.cwd === 'string' ? meta.cwd : null,
     ...(typeof meta.agentPreset === 'string' ? { agentPreset: meta.agentPreset } : {}),
     ...(typeof meta.parentSession === 'string' ? { parentSession: meta.parentSession } : {}),
+    isSeeded,
+    inheritedEventCount,
+    ...(forkSourceTurn !== undefined ? { forkSourceTurn } : {}),
     // inspect 只给一个会话自己的事实；子智能体清单由调用方从列表快照里取（见 subagentChildrenOf）。
     subagentChildren: [],
     turns,
@@ -325,6 +372,113 @@ export async function createChildSession(
     sessionId: createdId,
     ...(presetId !== undefined ? { agentPreset: presetId } : {}),
   }
+}
+
+/**
+ * 建一条**DSH 原生分支**所需的入参。
+ *
+ * 与 {@link CreateChildSessionInput} 的区别是：原生分支**要继承上下文**。
+ * 因此它不走 `ctx.agents.create`（那条路不给 seed），而是走官方 `sessionController.fork`，
+ * 由官方负责复制截止 `atSeq` 的事件前缀、写 `isSeeded`/`parentSession`，并把子会话挂进
+ * **源会话所在的工作区**（`forkWorkspace()` + `attachSession()`）。
+ */
+export interface ForkChildSessionInput {
+  /** 源会话（DSH 里的父对话）。 */
+  readonly sourceSessionId: string
+  /** fork 切点：源会话里一个真实存在的事件 seq（本插件用该轮 `turn/end` 的 seq）。 */
+  readonly atSeq: number
+  /** 调用方取消信号（官方 fork 当前不接收 signal，这里保留给上层统一形状）。 */
+  readonly signal?: AbortSignal
+}
+
+/** 原生分支建出来的子会话。 */
+export interface ForkedChildSession {
+  readonly sessionId: string
+}
+
+/**
+ * 用 DSH 官方通道开一条**原生分支**：继承截止 `atSeq` 的上下文，并进入源会话的工作区。
+ *
+ * 官方语义（`dsh-api-session-controller` 0.2.0-rc.2 源码逐条核对）：
+ *   1. `observeSession(source)` → `buildForkSeed(events, boundary)`（含切点事件）；
+ *   2. `agents.create({ seed, inheritedEventCount: boundary + 1, meta: { cwd, parentSession,
+ *      isSeeded: true, agentPreset } })`；
+ *   3. `forkWorkspace(source.header)` 反查源会话所在工作区 → `attachSession(childId)`，
+ *      挂不上会抛 `session/workspace-attach-failed`。
+ *
+ * 这正是官方聊天里那条「**在新对话中分支**」按钮走的同一条路（`ctx.sessions.fork({ sessionId, atSeq })`）。
+ *
+ * @param model - 探测到的会话能力。
+ * @param input - 源会话与 fork 切点。
+ * @returns 新会话 id；能力缺失/源会话不可 fork/切点不存在时抛可读错误。
+ */
+export async function forkChildSession(
+  model: SessionModel,
+  input: ForkChildSessionInput,
+): Promise<ForkedChildSession> {
+  const controller = model.controller
+  const fork = controller.fork
+  if (typeof fork !== 'function') {
+    throw new Error(
+      '此部署的会话控制面不提供 fork（ctx.sessionController.fork），无法创建 DSH 原生分支',
+    )
+  }
+  if (!Number.isInteger(input.atSeq) || input.atSeq < 0) {
+    throw new Error(`fork 切点必须是事件 seq（非负整数），收到 ${String(input.atSeq)}`)
+  }
+  // 必须带 `this` 调：这些方法是 typert Remote 方法，摘出来裸调用会失败（真机缺陷 8 同源）。
+  let raw: unknown
+  try {
+    raw = await fork.call(
+      controller,
+      { sessionId: input.sourceSessionId, atSeq: input.atSeq },
+      input.signal,
+    )
+  } catch (error) {
+    throw new Error(`官方 fork 失败：${messageOf(error)}`)
+  }
+  const childId =
+    raw !== null && typeof raw === 'object' && typeof (raw as { sessionId?: unknown }).sessionId === 'string'
+      ? (raw as { sessionId: string }).sessionId
+      : ''
+  if (childId === '') {
+    throw new Error('官方 fork 没有返回可用的 sessionId')
+  }
+  return { sessionId: childId }
+}
+
+/**
+ * 读一个会话当前落在哪个工作区（只读；不 attach）。
+ *
+ * 原生分支由官方负责 attach；这里在 fork 之后复核一次，把"到底进没进工作区"如实告诉用户。
+ * @param model - 探测到的会话能力。
+ * @param sessionId - 目标会话。
+ * @returns 与 {@link WorkspaceAttachOutcome} 同形（`attached:false` 带可读原因）。
+ */
+export function workspaceOfSession(
+  model: SessionModel,
+  sessionId: string,
+): WorkspaceAttachOutcome {
+  const registry = model.workspaces
+  if (registry === undefined) {
+    return { attached: false, reason: '此部署没有工作区注册表（ctx.workspaceRegistry）' }
+  }
+  let workspaces: readonly WorkspaceFace[]
+  try {
+    workspaces = registry.list()
+  } catch (error) {
+    return { attached: false, reason: `读取工作区失败：${messageOf(error)}` }
+  }
+  if (!Array.isArray(workspaces)) {
+    return { attached: false, reason: '工作区注册表形状不符（list() 没返回数组）' }
+  }
+  const owner = workspaces.find((workspace) =>
+    Array.isArray(workspace?.sessionIds) ? workspace.sessionIds.includes(sessionId) : false,
+  )
+  if (owner === undefined) {
+    return { attached: false, reason: '会话不在任何工作区里（侧边栏会显示「未分组」）' }
+  }
+  return { attached: true, workspaceId: owner.id }
 }
 
 /** 把新会话挂进父会话所在工作区的结果。 */

@@ -1,7 +1,7 @@
 {
   "name": "dsh-branch-conversation",
-  "version": "0.1.1",
-  "description": "DeepSeek Harness 插件：在官方侧边栏中新增一个「分支对话」页，用流程图管理主对话节点、子对话与文件节点。子对话不继承上下文，只继承模型人设与权限。",
+  "version": "0.2.0",
+  "description": "DeepSeek Harness 插件：在官方侧边栏中新增一个「分支对话」页，用流程图管理主对话节点、原生分支、子对话与文件节点。原生分支继承上下文与工作区（DSH 官方 fork）；子对话不继承上下文，只继承模型人设与权限。",
   "keywords": [
     "dsh",
     "deepseek-harness",

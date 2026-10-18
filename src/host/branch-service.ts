@@ -7,6 +7,9 @@
  *     **不能**用 `ctx.sessions.create`：那条路不属于 Agent 生命周期，官方明说
  *     "a session published outside that lifecycle persists nothing"——建出来的会话不落盘、
  *     不进会话列表，树上的节点就永远挂不上真实会话（真机缺陷 27）。
+ *   - **原生分支（M8）反过来用 fork**：`ctx.sessionController.fork({ sessionId, atSeq })`
+ *     复制截止被点轮 `turn/end`（含）的前缀，并让官方 `forkWorkspace()` 把子会话挂进父会话工作区。
+ *     两条通道并存，别互相替代。
  *   - 锁的粒度是**每棵树**（锁键 = treeId）；升根拆分按 treeId 排序取两把锁，避免死锁。
  *   - 不写 DSH 会话日志、不改会话头、不做会话删除。
  * @module dsh-branch-conversation/host/branch-service
@@ -31,9 +34,11 @@ import {
   attachToParentWorkspace,
   createChildSession,
   deliverFirstPrompt,
+  forkChildSession,
   inspectSession,
   readSessionSnapshot,
   sessionModelOf,
+  workspaceOfSession,
   type SessionModel,
   type SessionSnapshot,
 } from './session-model.ts'
@@ -43,6 +48,14 @@ const DEFAULT_TITLE = '未命名对话'
 
 /** 新分支占位节点的标题（子会话还没提问时用它；跑完第一轮后换成「第 N 轮」）。 */
 const PLACEHOLDER_LABEL = '新分支（待提问）'
+
+/**
+ * 原生分支（fork）占位节点的标题。
+ *
+ * 它与 {@link PLACEHOLDER_LABEL} 刻意不同：原生分支的上下文来自父对话，
+ * 不是"一张白纸"，所以不能沿用"新分支（待提问）"这个会让人误以为不继承上下文的文案。
+ */
+const NATIVE_PLACEHOLDER_LABEL = '原生分支（继承上文）'
 
 /** 一句提问的长度上限（超出截断，避免树文档被塞爆）。 */
 export const MAX_PROMPT_LENGTH = 4000
@@ -326,6 +339,170 @@ export class BranchService {
   }
 
   /**
+   * 在某个节点上开一条 **DSH 原生分支**（官方 `sessionController.fork`）。
+   *
+   * 与 {@link createBranch} 的差别就是需求里强调的那句：
+   * **这种对话不仅继承父对话的工作区，还继承对应的上下文**。
+   *
+   * 顺序（与官方聊天里的「在新对话中分支」一致）：
+   *   1. 用节点上的 `anchorSeq`（该轮 `turn/end` 的 seq）作为 fork 切点；
+   *   2. 官方 `fork` 复制截止该事件的前缀（含切点）→ 子会话 `isSeeded=true` + `parentSession`；
+   *   3. 官方 `forkWorkspace()` 把子会话挂进**源会话所在工作区**（失败会抛错）；
+   *   4. 本插件只做一件事：把子会话挂成该节点的一个**子节点**（同一棵树）；
+   *   5. 首句提问尽力投递进新会话（失败不影响已建好的会话与节点）。
+   *
+   * @param request - 父节点 id 与可选首句提问。
+   * @param signal - 调用方取消信号。
+   */
+  async forkBranch(
+    request: { readonly parentNodeId: string; readonly prompt?: string },
+    signal: AbortSignal,
+  ): Promise<BranchCreateResult> {
+    const model = this.model()
+    if (typeof model.controller.fork !== 'function') {
+      throw new BranchFailure(
+        'unsupported',
+        '此部署的会话控制面不提供 fork（ctx.sessionController.fork），无法创建 DSH 原生分支（功能已降级）',
+      )
+    }
+    const parentNodeId = request.parentNodeId.trim()
+    if (parentNodeId === '') throw new BranchFailure('invalid-request', '缺少 parentNodeId')
+    const prompt = (request.prompt ?? '').trim()
+    if (prompt.length > MAX_PROMPT_LENGTH) {
+      throw new BranchFailure('invalid-request', `首句提问超过 ${MAX_PROMPT_LENGTH} 字上限`)
+    }
+
+    const located = await this.locateNode(parentNodeId)
+    if (located === null) throw new BranchFailure('not-found', `节点 ${parentNodeId} 不存在`)
+    const parentNode = located.node
+    if (parentNode.kind !== 'qa') {
+      throw new BranchFailure('invalid-request', '文件节点上不能开分支，请在问答节点上操作')
+    }
+    if (parentNode.orphan) {
+      throw new BranchFailure('invalid-request', '这个节点所属的会话已被删除，不能从它开分支')
+    }
+    if (parentNode.turn === null || parentNode.anchorSeq === null) {
+      throw new BranchFailure(
+        'invalid-request',
+        '这个节点还没有完成一轮问答（没有 turn/end 锚点），官方 fork 只能在已完成轮次上切分',
+      )
+    }
+    const treeId = located.treeId
+    const parentSessionId = parentNode.sessionId
+    const atSeq = parentNode.anchorSeq
+
+    // 1) 官方原生分支：继承上下文 + 官方负责工作区归属。
+    let created
+    try {
+      created = await forkChildSession(model, { sourceSessionId: parentSessionId, atSeq, signal })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      // 切点不存在/没有已完成轮次属于"请求不对"，其余按 IO/内部错误报。
+      const code: BranchApiError['code'] = /does not exist|no completed turn|切点/u.test(message)
+        ? 'invalid-request'
+        : 'io'
+      throw new BranchFailure(code, message)
+    }
+
+    // 2) 复核工作区归属。官方 fork 成功时已 attach；若它没挂上而父会话本来就在工作区里，
+    //    这里再补一次（失败不拦路，回包用可读原因说明）。
+    let workspace = workspaceOfSession(model, created.sessionId)
+    if (!workspace.attached) {
+      const parentWorkspace = workspaceOfSession(model, parentSessionId)
+      if (parentWorkspace.attached) {
+        workspace = await attachToParentWorkspace(model, created.sessionId, parentSessionId)
+      }
+    }
+    if (!workspace.attached) {
+      this.deps.log(
+        `[branch-conversation] 原生分支 ${created.sessionId} 未加入父会话的工作区：${workspace.reason ?? '未知原因'}`,
+      )
+    }
+    const workspaceFields: Partial<BranchCreateResult> = {
+      workspaceAttached: workspace.attached,
+      ...(workspace.workspaceId !== undefined ? { workspaceId: workspace.workspaceId } : {}),
+      ...(workspace.attached ? {} : { workspaceError: workspace.reason ?? '未知原因' }),
+    }
+
+    // 3) 在同一棵树里把新会话挂成**被点那一轮**的子节点。
+    //    这里先查一次"这个会话是不是已经有一个节点"：并发/自动发现可能已经把它挂上了，
+    //    再 push 一个就会出现两个框指向同一个会话。
+    let nodeId = this.nextNodeId()
+    const write = await this.store.update(treeId, (current) => {
+      if (current === null) {
+        throw new BranchFailure('not-found', `树文档 ${treeId} 在写入前消失了`)
+      }
+      const anchor = current.nodes.find((node) => node.id === parentNode.id) ?? parentNode
+      const existing = current.nodes.find(
+        (node) => node.sessionId === created.sessionId && node.kind === 'qa',
+      )
+      if (existing !== undefined) {
+        nodeId = existing.id
+        if (anchor.children.includes(existing.id)) return current
+        const linkedAnchor: BranchNode = {
+          ...anchor,
+          children: unique([...anchor.children, existing.id]),
+        }
+        return {
+          ...current,
+          nodes: current.nodes.map((node) => (node.id === linkedAnchor.id ? linkedAnchor : node)),
+        }
+      }
+      const childNode: BranchNode = {
+        id: nodeId,
+        sessionId: created.sessionId,
+        turn: null,
+        anchorSeq: atSeq,
+        kind: 'qa',
+        label: labelForNativeFork(prompt),
+        collapsed: false,
+        orphan: false,
+        children: [],
+        file: null,
+        native: true,
+      }
+      const withChildren: BranchNode = {
+        ...anchor,
+        children: unique([...(anchor.children ?? []), childNode.id]),
+      }
+      return {
+        ...current,
+        nodes: upsertNodes(current.nodes, childNode).map((node) =>
+          node.id === withChildren.id ? withChildren : node,
+        ),
+      }
+    })
+    if (!write.ok) throw writeFailure(write.error)
+    await this.rememberSession(treeId, [parentSessionId, created.sessionId])
+
+    // 4) 首句提问：尽力而为（失败不影响会话与树）。
+    if (prompt === '') {
+      return {
+        sessionId: created.sessionId,
+        treeId,
+        nodeId,
+        promptDelivered: false,
+        nativeBranch: true,
+        contextInherited: true,
+        forkAtSeq: atSeq,
+        ...workspaceFields,
+      }
+    }
+    const delivered = await deliverFirstPrompt(model, created.sessionId, prompt, signal)
+    return {
+      sessionId: created.sessionId,
+      treeId,
+      nodeId,
+      promptDelivered: delivered.ok,
+      ...(delivered.reason !== undefined ? { promptError: delivered.reason } : {}),
+      nativeBranch: true,
+      contextInherited: true,
+      forkAtSeq: atSeq,
+      ...workspaceFields,
+    }
+  }
+
+  /**
    * 取"这一轮"对应的父节点；没有就补一个（例如该轮还没 `turn/end`、或顺手手填了下一轮）。
    *
    * @param document - 当前树文档。
@@ -362,7 +539,11 @@ export class BranchService {
   /**
    * 把某个会话缺失的轮次补成节点（用于把已有对话接进树）。
    *
-   * 幂等：同一轮次已有节点就不重复添加。
+   * **原生分支的关键差异**：seeded 会话（`isSeeded=true`，官方 fork 建出来的）不能按"新根"接树，
+   * 而要接回**父会话那棵树**、挂在 fork 切点所在的那一轮下面——否则用户点「在新对话中分支」后，
+   * 插件会把子会话当成一棵新树，图上完全看不出它从哪儿岔出去。
+   *
+   * 幂等：同一轮次已有节点就不重复添加；同一原生分支已有节点就不再挂第二个。
    * @param sessionId - 目标会话。
    * @param signal - 取消信号。
    */
@@ -373,6 +554,57 @@ export class BranchService {
     // 只靠列表判存在会误杀"刚建、还没落盘"的子会话：真机上 `sessionController.list()` 读的是
     // 已持久化的行，而刚通过 Agent 工厂建出来的会话在第一次 `session/event` 落盘前可能还不在列表里。
     // 所以这里**以 inspect 为准**（它能读内存里的活会话），列表只留给孤儿判定用。
+    const treeId =
+      facts.isSeeded && facts.parentSession !== undefined && facts.parentSession !== sessionId
+        ? ((await this.tryAdoptNativeFork(model, sessionId, facts, signal)) ??
+          (await this.syncOwnTree(model, sessionId, facts)))
+        : await this.syncOwnTree(model, sessionId, facts)
+    // 顺带发现"官方聊天里刚点出来、还没被打开过"的原生分支：用户回到父会话时也能在图上看见它。
+    await this.discoverNativeForks(model, sessionId, treeId, signal)
+    return this.viewOfSession(sessionId)
+  }
+
+  /**
+   * 尝试把 seeded 子会话挂回父树；失败只记日志，返回 null 让调用方退回"自己的树"。
+   *
+   * 为什么不直接让错误冒出去：打开一条会话不应该因为它"血缘对不上/旧数据缺切点"就整页报错。
+   * @param model - 会话能力。
+   * @param sessionId - seeded 子会话。
+   * @param facts - 子会话事实。
+   * @param signal - 取消信号。
+   * @returns 父树 id；无法安置时为 null。
+   */
+  private async tryAdoptNativeFork(
+    model: SessionModel,
+    sessionId: string,
+    facts: SessionFacts,
+    signal: AbortSignal,
+  ): Promise<string | null> {
+    try {
+      return await this.adoptNativeFork(model, sessionId, facts, signal, new Set([sessionId]))
+    } catch (error) {
+      this.deps.log(
+        `[branch-conversation] 原生分支 ${sessionId} 没能挂回父树，先按自己的树打开：${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      )
+      return null
+    }
+  }
+
+  /**
+   * 把一个会话自己的轮次补进它所在的树（必要时新建一棵以它为根的树）。
+   *
+   * @param model - 会话能力。
+   * @param sessionId - 目标会话。
+   * @param facts - 该会话事实（轮次已排除 fork 继承前缀）。
+   * @returns 该会话所在的树 id。
+   */
+  private async syncOwnTree(
+    model: SessionModel,
+    sessionId: string,
+    facts: SessionFacts,
+  ): Promise<string> {
     const treeId = (await this.resolveTreeId(sessionId)) ?? newTreeId(sessionId)
     const write = await this.store.update(treeId, (current) => {
       const document = current ?? emptyTree(treeId, sessionId, facts)
@@ -380,7 +612,245 @@ export class BranchService {
     })
     if (!write.ok) throw writeFailure(write.error)
     await this.rememberSession(treeId, [sessionId])
-    return this.viewOfSession(sessionId)
+    return treeId
+  }
+
+  /**
+   * 把一条**原生分支**（seeded 子会话）挂回父会话那棵树，挂在 fork 切点所在的那一轮下。
+   *
+   * 切点怎么来的：官方 `inspect` 给了精确的 `inheritedEventCount`，切点事件 seq = 它 - 1；
+   * 再用继承前缀里最后一个 `turn/end` 反推父轮次（`forkSourceTurn`）作为兜底匹配。
+   *
+   * 历史兼容：如果这个 seeded 会话**已经被旧版本本插件**接成了一棵自己的树
+   * （`resolveTreeId(child) !== 父树`），这里不迁移、不复制，保持原树并在日志里说明——
+   * 迁移会改写用户已有的树，风险大于收益。
+   *
+   * @param model - 会话能力。
+   * @param childId - seeded 子会话。
+   * @param childFacts - 子会话事实。
+   * @param signal - 取消信号。
+   * @param visiting - 正在安置的会话（防血缘环）。
+   * @returns 子会话最终所在的树 id；无法安置时为 null。
+   */
+  private async adoptNativeFork(
+    model: SessionModel,
+    childId: string,
+    childFacts: SessionFacts,
+    signal: AbortSignal,
+    visiting: Set<string>,
+  ): Promise<string | null> {
+    const parentSessionId = childFacts.parentSession
+    if (parentSessionId === undefined || parentSessionId === '') return null
+    const parentTreeId = await this.ensureTreeForSession(model, parentSessionId, signal, visiting)
+    if (parentTreeId === null) return null
+
+    const existingChildTree = await this.resolveTreeId(childId)
+    if (existingChildTree !== null && existingChildTree !== parentTreeId) {
+      this.deps.log(
+        `[branch-conversation] 原生分支 ${childId} 已在旧树 ${existingChildTree} 里，保持原树不迁移`,
+      )
+      return existingChildTree
+    }
+
+    const parentFacts = await inspectSession(model, parentSessionId, signal)
+    const write = await this.store.update(parentTreeId, (current) => {
+      if (current === null) {
+        throw new BranchFailure('not-found', `父树 ${parentTreeId} 在写入前消失了`)
+      }
+      let document = current
+      // 父会话的轮次可能还没铺进树（例如用户从没打开过父会话）：先补齐，才能找到锚点。
+      if (parentFacts !== null) {
+        document = this.syncTurns(document, parentSessionId, parentFacts.turns)
+      }
+
+      let childNode = document.nodes.find(
+        (node) => node.sessionId === childId && node.kind === 'qa',
+      )
+      if (childNode === undefined) {
+        const anchor = this.anchorForFork(document, parentSessionId, childFacts, parentFacts)
+        childNode = this.nativeForkNode(childId, childFacts, anchor)
+        const anchorInDocument = document.nodes.find((node) => node.id === anchor.id)
+        const linkedAnchor: BranchNode = {
+          ...(anchorInDocument ?? anchor),
+          children: unique([...(anchorInDocument ?? anchor).children, childNode.id]),
+        }
+        document = {
+          ...document,
+          nodes: upsertNodes(document.nodes, linkedAnchor, childNode),
+        }
+      }
+      // 子会话自己的轮次（**不含**继承前缀）继续铺进来；占位节点会被第一个自有轮次认领。
+      return this.syncTurns(document, childId, childFacts.turns)
+    })
+    if (!write.ok) throw writeFailure(write.error)
+    await this.rememberSession(parentTreeId, [parentSessionId, childId])
+    return parentTreeId
+  }
+
+  /**
+   * 确保某个会话有一棵树（必要时递归把它先接回自己的父树）。
+   *
+   * 递归只发生在"父会话本身也是原生分支"时；`visiting` 防止血缘成环。
+   * @param model - 会话能力。
+   * @param sessionId - 目标会话。
+   * @param signal - 取消信号。
+   * @param visiting - 正在安置的会话集合。
+   * @returns 树 id；读不到会话时为 null。
+   */
+  private async ensureTreeForSession(
+    model: SessionModel,
+    sessionId: string,
+    signal: AbortSignal,
+    visiting: Set<string>,
+  ): Promise<string | null> {
+    const existing = await this.resolveTreeId(sessionId)
+    if (existing !== null) return existing
+    const facts = await inspectSession(model, sessionId, signal)
+    if (facts === null) return null
+    if (
+      facts.isSeeded &&
+      facts.parentSession !== undefined &&
+      facts.parentSession !== sessionId &&
+      !visiting.has(sessionId)
+    ) {
+      visiting.add(sessionId)
+      try {
+        const placed = await this.adoptNativeFork(model, sessionId, facts, signal, visiting)
+        if (placed !== null) return placed
+      } finally {
+        visiting.delete(sessionId)
+      }
+    }
+    return this.syncOwnTree(model, sessionId, facts)
+  }
+
+  /**
+   * fork 切点对应的父节点：先按事件 seq 精确匹配，再按父轮次匹配，最后退回最新一轮。
+   *
+   * 匹配不到（父会话在树里连一轮都没有）时补一个父轮次节点，保证分支一定挂得上。
+   * @param document - 父树文档。
+   * @param parentSessionId - 父会话。
+   * @param childFacts - 子会话事实（含 fork 切点）。
+   * @param parentFacts - 父会话事实（兜底取轮次）。
+   * @returns 作为挂载点的父节点。
+   */
+  private anchorForFork(
+    document: BranchTreeDocument,
+    parentSessionId: string,
+    childFacts: SessionFacts,
+    parentFacts: SessionFacts | null,
+  ): BranchNode {
+    const boundary =
+      childFacts.inheritedEventCount > 0 ? childFacts.inheritedEventCount - 1 : null
+    const candidates = document.nodes.filter(
+      (node) => node.sessionId === parentSessionId && node.kind === 'qa',
+    )
+    if (boundary !== null) {
+      const byBoundary = candidates.find((node) => node.anchorSeq === boundary)
+      if (byBoundary !== undefined) return byBoundary
+    }
+    if (childFacts.forkSourceTurn !== undefined) {
+      const byTurn = candidates.find((node) => node.turn === childFacts.forkSourceTurn)
+      if (byTurn !== undefined) return byTurn
+    }
+    let latest: BranchNode | undefined
+    for (const node of candidates) {
+      if (node.turn === null) continue
+      if (latest === undefined || (latest.turn ?? -1) < node.turn) latest = node
+    }
+    if (latest !== undefined) return latest
+
+    const turn =
+      childFacts.forkSourceTurn ??
+      parentFacts?.turns.at(-1)?.turn ??
+      parentFacts?.turns[0]?.turn ??
+      null
+    if (turn === null) {
+      throw new BranchFailure(
+        'invalid-request',
+        `父会话 ${parentSessionId} 在树里没有可用的轮次节点，无法确定原生分支的挂载点`,
+      )
+    }
+    return {
+      id: `n-session-${parentSessionId}-t${turn}`,
+      sessionId: parentSessionId,
+      turn,
+      anchorSeq: boundary,
+      kind: 'qa',
+      label: `第 ${turn} 轮`,
+      collapsed: false,
+      orphan: false,
+      children: [],
+      file: null,
+    }
+  }
+
+  /** 原生分支在树上的占位节点（自有轮次跑完后会被认领）。 */
+  private nativeForkNode(childId: string, childFacts: SessionFacts, anchor: BranchNode): BranchNode {
+    const boundary =
+      childFacts.inheritedEventCount > 0 ? childFacts.inheritedEventCount - 1 : null
+    return {
+      id: this.nextNodeId(),
+      sessionId: childId,
+      turn: null,
+      anchorSeq: boundary ?? anchor.anchorSeq ?? null,
+      kind: 'qa',
+      label: NATIVE_PLACEHOLDER_LABEL,
+      collapsed: false,
+      orphan: false,
+      children: [],
+      file: null,
+      native: true,
+    }
+  }
+
+  /**
+   * 发现"官方聊天里刚点出来、还没打开过"的原生分支，并挂进当前树。
+   *
+   * 为什么需要它：官方「在新对话中分支」会把新会话直接打开，但用户可能马上切回父会话；
+   * 只靠"打开子会话时 adopt"的话，父会话图上就暂时看不到这条分支。
+   *
+   * @param model - 会话能力。
+   * @param sessionId - 当前会话（扫描它的直接子会话）。
+   * @param treeId - 当前树。
+   * @param signal - 取消信号。
+   */
+  private async discoverNativeForks(
+    model: SessionModel,
+    sessionId: string,
+    treeId: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const snapshot = await readSessionSnapshot(model, signal)
+    if (snapshot === null) return
+    const candidates: string[] = []
+    for (const [childId, parentId] of snapshot.parents) {
+      if (parentId !== sessionId || childId === sessionId) continue
+      if (snapshot.subagents.has(childId)) continue
+      candidates.push(childId)
+    }
+    if (candidates.length === 0) return
+
+    const document = await this.readTree(treeId)
+    if (document === null) return
+    const known = new Set(document.nodes.map((node) => node.sessionId))
+    for (const childId of candidates) {
+      if (known.has(childId)) continue
+      if ((await this.resolveTreeId(childId)) !== null) continue
+      const childFacts = await inspectSession(model, childId, signal)
+      if (childFacts === null || !childFacts.isSeeded) continue
+      if (childFacts.parentSession !== sessionId) continue
+      try {
+        await this.adoptNativeFork(model, childId, childFacts, signal, new Set([childId]))
+        known.add(childId)
+      } catch (error) {
+        this.deps.log(
+          `[branch-conversation] 发现原生分支 ${childId} 但没能挂进树：${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        )
+      }
+    }
   }
 
   /**
@@ -703,6 +1173,8 @@ export class BranchService {
     readonly agents: boolean
     readonly sessionController: boolean
     readonly agentPresets: boolean
+    /** 官方原生分支（`sessionController.fork`）在不在：在才能"继承上下文的在新对话中分支"。 */
+    readonly nativeFork: boolean
     /** 工作区注册表在不在：在才谈得上"把子会话挂进父会话的工作区"（缺陷 29）。 */
     readonly workspaces: boolean
   }> {
@@ -711,7 +1183,10 @@ export class BranchService {
     // 真机实测：未 inject 的服务属性访问会抛 `cannot get property "…" without inject`，
     // 所以探测一律走 serviceOf（永不抛），否则整条 diagnostics 会变成 500。
     const agents = serviceOf<{ create?: unknown }>(this.deps.ctx, 'agents')
-    const sessionController = serviceOf<{ list?: unknown }>(this.deps.ctx, 'sessionController')
+    const sessionController = serviceOf<{ list?: unknown; fork?: unknown }>(
+      this.deps.ctx,
+      'sessionController',
+    )
     const agentPresets = serviceOf<{ resolve?: unknown }>(this.deps.ctx, 'agentPresets')
     const workspaces = serviceOf<{ list?: unknown }>(this.deps.ctx, 'workspaceRegistry')
     return {
@@ -721,6 +1196,7 @@ export class BranchService {
       agents: typeof agents?.create === 'function',
       sessionController: typeof sessionController?.list === 'function',
       agentPresets: typeof agentPresets?.resolve === 'function',
+      nativeFork: typeof sessionController?.fork === 'function',
       workspaces: typeof workspaces?.list === 'function',
     }
   }
@@ -786,6 +1262,17 @@ function labelForChild(prompt: string): string {
   if (prompt === '') return PLACEHOLDER_LABEL
   const firstLine = prompt.split(/\r?\n/, 1)[0] ?? prompt
   return firstLine.length > 40 ? `${firstLine.slice(0, 40)}…` : firstLine
+}
+
+/**
+ * 原生分支首节点标题。
+ *
+ * 有首句提问时沿用提问首行（与子会话一致）；没有时用"原生分支（继承上文）"——
+ * **不能**用 {@link PLACEHOLDER_LABEL}，否则会把它误标成"不继承上下文的白纸会话"。
+ */
+function labelForNativeFork(prompt: string): string {
+  if (prompt === '') return NATIVE_PLACEHOLDER_LABEL
+  return labelForChild(prompt)
 }
 
 /** 文件节点的默认标题：取路径最后一段。 */

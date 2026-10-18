@@ -80,6 +80,7 @@ const node = (id, extra = {}) => ({
   orphan: extra.orphan ?? false,
   children: extra.children ?? [],
   file: extra.file ?? null,
+  native: extra.native ?? false,
 })
 
 /** 造一个树视图。 */
@@ -537,6 +538,17 @@ track('文件节点：kind/filePath/fileMissing、turn 为 null、不可跳会�
   const qa = boxOf(layout, 'n2')
   assert.equal(qa.filePath, null, 'qa 节点的 filePath 应为 null')
   assert.equal(qa.fileMissing, false, 'qa 节点的 fileMissing 应为 false')
+})
+
+track('原生分支标记：native 透传到框上（框内可显示「继承上文」）', () => {
+  const layout = layoutTree(
+    branchView([
+      node('n1', { turn: 1, children: ['n2'] }),
+      node('n2', { sessionId: 's-child', native: true }),
+    ]),
+  )
+  assert.equal(boxOf(layout, 'n2').native, true, '原生分支标记应透传到 TreeBox')
+  assert.equal(boxOf(layout, 'n1').native, false, '普通轮次节点不应被标成原生分支')
 })
 
 track('孤儿与当前节点：orphan/current 标记正确传递，孤儿不可跳会话', () => {

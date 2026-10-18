@@ -16,6 +16,8 @@ export interface CapabilityReport {
   readonly sessionController: boolean
   /** `ctx.agentPresets` 是否在场。 */
   readonly agentPresets: boolean
+  /** 官方原生分支（`sessionController.fork`）是否可用：可用才能"继承上下文的在新对话中分支"。 */
+  readonly nativeFork?: boolean
   /** `ctx.workspaceRegistry` 是否在场：在才能把子会话挂进父会话的工作区（缺陷 29）。 */
   readonly workspaces: boolean
   /** 存储根状态。 */

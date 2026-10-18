@@ -92,6 +92,13 @@ export interface BranchNode {
   readonly children: readonly string[]
   /** kind === 'file' 时的文件引用。 */
   readonly file: BranchFileRef | null
+  /**
+   * 是否是 **DSH 原生分支**（官方 fork，继承上文）。
+   *
+   * 缺省/`false` = 本插件早先的"子对话"（不继承上下文）。
+   * 只影响展示标记，不参与节点身份；旧文档没有这个字段也能正常读。
+   */
+  readonly native?: boolean
 }
 
 /** 树文档的根信息。 */
@@ -134,9 +141,33 @@ export interface SessionFacts {
   readonly agentPreset?: string
   /** 该会话的父子血缘（DSH 会话头上的 `parentSession`）。 */
   readonly parentSession?: string
+  /**
+   * 会话头是否声明"含 fork 继承前缀"（DSH 的 `isSeeded`）。
+   *
+   * DSH 原生的"在新对话中分支"（官方 `sessions.fork`）复制**截止某一轮的事件前缀**：
+   * 子会话头 `isSeeded = true`，`parentSession` 指向父会话，上下文因此与父会话连续。
+   * 这与本插件早先"不继承上下文"的子对话是**两种不同动作**。
+   */
+  readonly isSeeded: boolean
+  /**
+   * 继承事件的条数（官方 `SessionObservation.inheritedEventCount`；无 seed 时为 0）。
+   *
+   * 官方文档原话：返回事件正文的读取还携带精确 `inheritedEventCount`，
+   * 因此调用方**无需从日志推断切点**即可区分继承事件与自有事件。
+   * 本插件用它做两件事：① 折轮次时**只算子会话自己的轮次**（否则树上会把父对话的整段历史复制一遍）；
+   * ② 反推 fork 切点 `inheritedEventCount - 1`，把新分支挂到**被点的那一轮**下。
+   */
+  readonly inheritedEventCount: number
+  /**
+   * fork 切点所在父轮的轮次号（只对 seeded 会话有意义）。
+   *
+   * 由继承前缀里最后一个 `turn/end` 推出；拿不到时为 `undefined`，
+   * 此时挂载点退回"该会话最新一轮"。它只为"挂对位置"服务，不参与节点身份。
+   */
+  readonly forkSourceTurn?: number
   /** 该会话自己派生的子智能体会话（按裁决排除出树）。 */
   readonly subagentChildren: readonly string[]
-  /** 已完成（有 `turn/end`）的轮次，按出现顺序。 */
+  /** 已完成（有 `turn/end`）的轮次，按出现顺序（**不含** fork 继承来的轮次）。 */
   readonly turns: readonly SessionTurnFact[]
 }
 
@@ -183,6 +214,17 @@ export interface BranchCreateResult {
   readonly workspaceId?: string
   /** 没挂上的可读原因（`workspaceAttached === false` 时存在）。 */
   readonly workspaceError?: string
+  /**
+   * 这条分支是不是**DSH 原生分支**（官方 `sessions.fork`）。
+   *
+   * `true`：继承了截止被点那一轮的**全部上下文**（`isSeeded=true`），并由官方负责进入父会话的工作区；
+   * 缺省/`false`：本插件早先的"子对话"（不继承上下文，只继承人设/权限）。
+   */
+  readonly nativeBranch?: boolean
+  /** 是否继承了父会话的上下文（原生分支恒为 true；旧回包缺省）。 */
+  readonly contextInherited?: boolean
+  /** 原生分支的 fork 切点（父轮 `turn/end` 的事件 seq；上下文截止到这里，含该事件）。 */
+  readonly forkAtSeq?: number
 }
 
 /** 读取某个会话所在树的结果。 */

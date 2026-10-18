@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Branch Conversation",
-    "description": "Manage every turn of a conversation, its child conversations and file nodes as a node-and-wire flow chart. A child conversation inherits only the model preset and permissions, never the context; the main conversation is never rewritten."
+    "description": "Manage every turn of a conversation, its native branches, child conversations and file nodes as a node-and-wire flow chart. A native branch inherits the context through that turn and joins the parent's workspace; a child conversation inherits only the model preset and permissions, never the context; the main conversation is never rewritten."
   }
 }

@@ -84,6 +84,8 @@ track('/branch/diagnostics 返回 ok 信封与完整字段', async () => {
   assert.equal(typeof value.agents, 'boolean')
   assert.equal(typeof value.sessionController, 'boolean')
   assert.equal(typeof value.agentPresets, 'boolean')
+  // 原生分支能力：官方 `sessionController.fork`（"在新对话中分支"同一条通道）。
+  assert.equal(typeof value.nativeFork, 'boolean')
   // 缺陷 29：工作区注册表的能力探测（在 → 子会话能挂进父会话的工作区）。
   assert.equal(typeof value.workspaces, 'boolean')
   assert.equal(value.panelId, 'branch-conversation')

@@ -372,11 +372,15 @@ track('页面初始态（还没读到树）不画空画布，只给一句可读�
   assert.equal(empty.length, 1, '应当给一句"还没有树"的可读提示')
 })
 
-track('节点上的「＋」表单：有「建子会话 / 挂文件」两个页签，默认是建子会话', () => {
+track('节点上的「＋」表单：有「原生分支 / 建子会话 / 挂文件」三个页签，默认是原生分支', () => {
   assert.equal(typeof exports.BranchCreateForm, 'function', '产物没有导出 BranchCreateForm（节点上的表单）')
   assert.ok(
     source.includes('branch/attach-file'),
     '产物里没有 attach-file 调用：文件节点入口接线丢了',
+  )
+  assert.ok(
+    source.includes('branch/fork'),
+    '产物里没有 fork 调用：DSH 原生分支入口接线丢了',
   )
   const element = exports.BranchCreateForm({
     parentLabel: '第 2 轮',
@@ -407,22 +411,22 @@ track('节点上的「＋」表单：有「建子会话 / 挂文件」两个页�
   }
   const elements = flatten(element)
   const tabs = elements.filter((item) => item.props?.['data-dsh-branch-form-tab'] !== undefined)
-  assert.equal(tabs.length, 2, '应有「建子会话」与「挂文件」两个页签')
+  assert.equal(tabs.length, 3, '应有「原生分支」「建子会话」「挂文件」三个页签')
   assert.deepEqual(
     tabs.map((item) => item.props['data-dsh-branch-form-tab']),
-    ['branch', 'file'],
-    '页签顺序变了（建子会话在前、挂文件在后）',
+    ['native', 'branch', 'file'],
+    '页签顺序变了（原生分支在前、建子会话在中、挂文件在后）',
   )
-  assert.equal(element.props['data-dsh-branch-form-mode'], 'branch', '默认模式应是建子会话')
+  assert.equal(element.props['data-dsh-branch-form-mode'], 'native', '默认模式应是原生分支')
   assert.equal(
     elements.filter((item) => item.type === 'textarea').length,
     1,
-    '默认视图应有"首句提问"框',
+    '默认视图应有"分支后的第一句提问"框',
   )
   assert.equal(
     elements.filter((item) => item.type === 'input').length,
-    1,
-    '默认视图只应有"父节点轮次"一个输入框',
+    0,
+    '原生分支模式按被点的节点 fork，不该再有"父节点轮次"输入框',
   )
 })
 
